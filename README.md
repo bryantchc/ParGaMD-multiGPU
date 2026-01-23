@@ -304,6 +304,10 @@ python reweigh.py --input merged_data.dat --order 10 --T 300 \
 - `pmf_c2.xvg` / `pmf_c2_2D.xvg`: PMF with 2nd-order cumulant correction
 - `pmf_c3.xvg` / `pmf_c3_2D.xvg`: PMF with 3rd-order cumulant correction
 
+
+
+<img width="1006" height="486" alt="image" src="https://github.com/user-attachments/assets/31893eb2-889a-4022-b60e-cc02054a3e07" />
+
 ---
 
 ## Citation
