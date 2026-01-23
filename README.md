@@ -96,8 +96,7 @@ For optimal GPU utilization, enable MPS to run multiple WESTPA segments per GPU:
 # Start MPS daemon (execute once per job) if using MPS (you might need to check if MPS enabled in your cluster or org)
 nvidia-cuda-mps-control -d
 
-# Launch ParGaMD via WESTPA
-w_run --work-manager processes --n-workers <N_WORKERS>
+run run_WE.sh
 ```
 
 MPS enables concurrent kernel execution from multiple OpenMM instances on a single GPU, yielding approximately **4-fold throughput improvement** compared to single-segment-per-GPU execution.
