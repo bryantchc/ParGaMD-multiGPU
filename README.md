@@ -93,7 +93,7 @@ Upon completion, the GaMD parameters are written to output files and serve as in
 For optimal GPU utilization, enable MPS to run multiple WESTPA segments per GPU:
 
 ```bash
-# Start MPS daemon (execute once per job)
+# Start MPS daemon (execute once per job) if using MPS (you might need to check if MPS enabled in your cluster or org)
 nvidia-cuda-mps-control -d
 
 # Launch ParGaMD via WESTPA
