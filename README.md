@@ -57,7 +57,7 @@ pip install westpa numpy matplotlib
 
 ## Running ParGaMD with OpenMM
 
-ParGaMD simulations follow a two-phase protocol: (1) GaMD parameter equilibration and (2) ParGaMD production with WESTPA.
+ParGaMD simulations follow a two-phase protocol: (1) Conventional GaMD equilibration run and (2) ParGaMD production with WESTPA.
 
 ### Phase 1: GaMD Parameter Equilibration
 
