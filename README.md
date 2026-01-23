@@ -14,7 +14,6 @@ ParGaMD leverages the accelerated sampling capabilities of GaMD and combines the
 For theoretical details, please refer to:
 > Siddharth Sonti, Anugraha Thyagatur , Hung-Yu Wan, et al. Accelerating free energy exploration using parallelizable Gaussian accelerated molecular dynamics (ParGaMD). ChemRxiv. 28 May 2025.
 DOI: https://doi.org/10.26434/chemrxiv-2025-rr5v9
-> Siddharth and Anugraha contributed equally to this work
 
 ---
 
