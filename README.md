@@ -318,9 +318,9 @@ If you use this software, please cite:
 @article{sonti2025pargamd,
   title={Accelerating free energy exploration using parallelizable Gaussian accelerated molecular dynamics (ParGaMD)},
   author={Sonti, Siddharth and Thyagatur, Anugraha and Wan, Hung-Yu and Hamelynck, Maxen and Faller, Roland and Ahn, Surl-Hee},
-  journal={Journal of Chemical Theory and Computation},
+  journal={https://doi.org/10.26434/chemrxiv-2025-rr5v9},
   year={2025},
-  publisher={ACS Publications}
+  publisher={ChemRxiv: chemistry preprints}
 }
 ```
 
@@ -328,7 +328,7 @@ If you use this software, please cite:
 
 ## License
 
-MIT License. See [LICENSE](LICENSE) for details.
+MIT License
 
 ## Contact
 
