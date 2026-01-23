@@ -6,7 +6,7 @@ A hybrid enhanced sampling method integrating Gaussian Accelerated Molecular Dyn
 
 ParGaMD leverages the accelerated sampling capabilities of GaMD and combines them with the multi-GPU parallelization framework of the Weighted Ensemble method. This integration enables:
 
-- **Near-linear GPU scaling** for molecular dynamics simulations
+- **Super-Linear GPU scaling** for molecular dynamics simulations
 - **Guided exploration** along user-defined collective variables (CVs)
 - **Enhanced barrier crossing** through GaMD's harmonic boost potential
 - **Rigorous free energy recovery** via established reweighting protocols
