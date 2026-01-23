@@ -53,13 +53,6 @@ conda install -c conda-forge openmm mdtraj ambertools
 pip install westpa numpy matplotlib
 ```
 
-### Step 3: Install the Modified GaMD-OpenMM Package
-
-```bash
-cd gamd-openmm
-python setup.py install
-```
-
 ---
 
 ## Running ParGaMD with OpenMM
