@@ -64,7 +64,7 @@ ParGaMD simulations follow a two-phase protocol: (1) Conventional GaMD equilibra
 Before initiating ParGaMD, run a short GaMD simulation (default: 4 ns) to obtain the finalized boost potential parameters (*E*, *V*<sub>max</sub>, *V*<sub>min</sub>, *k*).
 
 ```bash
-gamdRunner xml equilibration_config.xml
+gamdRunner xml input.xml or sbatch 
 ```
 
 The equilibration protocol comprises:
