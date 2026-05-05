@@ -1,5 +1,14 @@
 # Parallelizable Gaussian Accelerated Molecular Dynamics (ParGaMD)
 
+> **Local-workstation fork**: this fork has been adapted to run on a
+> single Linux box with NVIDIA GPUs (no SLURM, no module loads). For
+> the local-execution story — launcher, MPS configuration, NaN
+> robustness, system swapping, troubleshooting — see
+> **[WORKSTATION.md](WORKSTATION.md)**. The original cluster
+> launchers are preserved in `_tacc_original/` for reference. The
+> theory and reweighting documentation below is unchanged from
+> upstream.
+
 A hybrid enhanced sampling method integrating Gaussian Accelerated Molecular Dynamics (GaMD) with the Weighted Ensemble (WE) framework for efficient multi-GPU parallelization.
 
 ## Overview

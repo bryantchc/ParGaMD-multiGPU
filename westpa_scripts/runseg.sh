@@ -1,6 +1,12 @@
 #!/bin/bash
 set -x  # Print commands for debugging
 
+# Source env.sh defensively so SYSTEM_NAME and conda are guaranteed to be
+# set even when this script is invoked outside the run_local.sh chain.
+if [ -n "$WEST_SIM_ROOT" ] && [ -f "$WEST_SIM_ROOT/env.sh" ]; then
+    source "$WEST_SIM_ROOT/env.sh"
+fi
+
 ##############################################################################
 # 1) Rely on HPC to set CUDA_VISIBLE_DEVICES
 ##############################################################################
@@ -16,31 +22,118 @@ cd "$WEST_CURRENT_SEG_DATA_REF" || exit 1
 ##############################################################################
 # 3) Link necessary files (topology, coords, XML)
 ##############################################################################
-ln -sfv "$WEST_SIM_ROOT/common_files/chignolin.parm7" .
+# Honor $SYSTEM_NAME from env.sh (sourced above). Hard error if unset —
+# a silent chignolin fallback used to mask misconfigured swaps.
+# We symlink the system-specific parm7/rst7 to GENERIC names inside the seg
+# dir so input.xml can be system-agnostic (it always references topology.parm7
+# and coordinates.rst7). To swap systems: drop new <name>.{parm7,rst7,pdb}
+# into common_files/ and change SYSTEM_NAME in env.sh.
+: "${SYSTEM_NAME:?SYSTEM_NAME is unset; check env.sh}"
+ln -sfv "$WEST_SIM_ROOT/common_files/${SYSTEM_NAME}.parm7" ./topology.parm7
+ln -sfv "$WEST_SIM_ROOT/common_files/${SYSTEM_NAME}.rst7" ./coordinates.rst7
 ln -sfv "$WEST_SIM_ROOT/common_files/gamd-restart.dat" .
 ln -sfv "$WEST_SIM_ROOT/common_files/input.xml" .
-ln -sfv "$WEST_SIM_ROOT/common_files/chignolin.rst7" .
 
 # Fix XML output directory to current location
 sed -i 's|<directory>.*</directory>|<directory>.</directory>|' input.xml
 
 ##############################################################################
-# 4) Handle GaMD checkpoint for first vs. subsequent iteration
+# 4) Handle GaMD checkpoint for first vs. subsequent iteration, with retry
 ##############################################################################
+# The Langevin integrator + GaMD bias is intrinsically stochastic. ~5-10% of
+# segments hit a "Particle coordinate is NaN" within the first ~250 steps
+# from a bad random-noise draw, even when the parent state is fine. Without
+# retry, WESTPA's strict propagation policy kills the whole run on the first
+# segment failure (probability of clean iteration over 24 walkers is ~0.13).
+#
+# We retry up to MAX_RETRIES, each time:
+#   - Restoring the seed checkpoint locally (gamdRunner overwrites it on
+#     failure with a NaN-state checkpoint, useless for retry).
+#   - Bumping the integrator's <random-seed> in input.xml. Different seeds
+#     are extremely unlikely to all produce NaN from the same parent state.
+#   - Falling out of the loop on first success (non-empty output_restart.dcd).
+GAMD_RUNNER="$WEST_SIM_ROOT/common_files/gamdRunner"
+GAMD_CHECKPOINT_SEED="$WEST_SIM_ROOT/common_files/gamd_restart.checkpoint"
 if [ "$WEST_CURRENT_ITER" -eq 1 ]; then
-    rsync -av --progress --checksum  /scratch/10597/anugrahat/pargamd/ParGaMD_chig_2/common_files/out27/gamd_restart.checkpoint ./gamd_restart.checkpoint
-    sync
-    python /scratch/10597/anugrahat/pargamd/ParGaMD_chig_2/common_files/gamdRunner -p CUDA -r xml input.xml
+    PARENT_CHECKPOINT="$GAMD_CHECKPOINT_SEED"
 else
-    cp -L "$WEST_PARENT_DATA_REF/gamd_restart.checkpoint" ./gamd_restart.checkpoint
-    python /scratch/10597/anugrahat/pargamd/ParGaMD_chig_2/common_files/gamdRunner -p CUDA -r xml input.xml
+    PARENT_CHECKPOINT="$WEST_PARENT_DATA_REF/gamd_restart.checkpoint"
 fi
 
+MAX_RETRIES=3
+SUCCESS=0
+for attempt in $(seq 1 $MAX_RETRIES); do
+    cp -L "$PARENT_CHECKPOINT" ./gamd_restart.checkpoint
 
-if [ ! -f "gamd_restart.checkpoint" ] || [ ! -f "output_restart.dcd" ]; then
-    echo "Error: GaMD simulation failed to generate output files"
-    ls -lh
-    exit 1
+    if [ "$attempt" -gt 1 ]; then
+        # Vary the seed on retry. Mix $RANDOM with PID and attempt to avoid
+        # collisions across the 4 concurrent workers. Bash $RANDOM is 16-bit;
+        # we square it for a wider range that fits in OpenMM's int seed.
+        SEED=$(( (RANDOM * RANDOM + $$ + attempt) % 2000000000 ))
+        sed -i "s|<random-seed>[0-9-]*</random-seed>|<random-seed>${SEED}</random-seed>|" input.xml
+        echo "[runseg] iter=$WEST_CURRENT_ITER seg=$WEST_CURRENT_SEG_ID attempt=$attempt with random-seed=$SEED" >&2
+    fi
+
+    python "$GAMD_RUNNER" -p CUDA -r xml input.xml
+
+    # Stricter validity check than `-s`: a late-NaN gamdRunner can write a
+    # DCD header (~96 bytes) plus a frame or two before crashing, producing
+    # a non-empty but truncated file that downstream MDAnalysis can't read
+    # ("OSError: opened empty file. No frames are saved", or wrong-shape
+    # pcoord arrays).
+    #
+    # Read the DCD's NSET field (frame count) from header offset 8 via
+    # pure-stdlib struct. System-agnostic — no atom-count or size threshold
+    # baked in, works for any system that produces 100 frames per WE segment.
+    # ~10ms per check (vs ~1s for an MDAnalysis Universe load).
+    EXPECTED_FRAMES=100
+    DCD_FRAMES=$(python -c "
+import struct, sys
+try:
+    with open('output_restart.dcd','rb') as f:
+        f.read(8)  # leading 4-byte block size + 'CORD' magic
+        sys.stdout.write(str(struct.unpack('<i', f.read(4))[0]))
+except Exception:
+    sys.stdout.write('0')
+" 2>/dev/null)
+    if [ "${DCD_FRAMES:-0}" -ge "$EXPECTED_FRAMES" ]; then
+        SUCCESS=1
+        break
+    fi
+    echo "[runseg] iter=$WEST_CURRENT_ITER seg=$WEST_CURRENT_SEG_ID attempt=$attempt failed (DCD has ${DCD_FRAMES:-0} frames < $EXPECTED_FRAMES expected)" >&2
+done
+
+if [ "$SUCCESS" -ne 1 ]; then
+    # Freeze-fallback: all $MAX_RETRIES attempts hit NaN, so the parent
+    # state is deterministically NaN-prone (probably an atom on the edge
+    # of an energy cliff that any forward integration pushes over). Rather
+    # than killing the entire WE run via WESTPA's strict propagation policy,
+    # we copy the parent's trajectory + checkpoint forward — the walker
+    # "stays in place" this iteration and gets resampled next iteration.
+    # Some sampling efficiency is lost; grep "FROZEN" in seg_logs/ to
+    # identify and quantify these events for any final analysis.
+    echo "[runseg] FROZEN iter=$WEST_CURRENT_ITER seg=$WEST_CURRENT_SEG_ID: $MAX_RETRIES retries all hit NaN. Walker stays in place." >&2
+    cp -L "$PARENT_CHECKPOINT" ./gamd_restart.checkpoint
+    if [ -s "$WEST_PARENT_DATA_REF/output_restart.dcd" ]; then
+        # Iter > 1: parent has a 100-frame DCD from its own runseg.sh execution.
+        cp -L "$WEST_PARENT_DATA_REF/output_restart.dcd" ./output_restart.dcd
+    elif [ -f "$WEST_PARENT_DATA_REF/output_restart.rst7" ]; then
+        # Iter 1: parent is the basis state (single-frame .rst7). Synthesize
+        # a 100-frame DCD by replicating the rst7 coordinates so downstream
+        # MDAnalysis pcoord computation produces 100 (identical) rows.
+        python <<EOF
+import MDAnalysis as mda
+u = mda.Universe("topology.parm7", "$WEST_PARENT_DATA_REF/output_restart.rst7", format="INPCRD")
+with mda.Writer("output_restart.dcd", u.atoms.n_atoms) as W:
+    for _ in range(100):
+        W.write(u.atoms)
+EOF
+    else
+        echo "Error: parent state has neither DCD nor rst7 at $WEST_PARENT_DATA_REF; cannot freeze walker"
+        ls -lh "$WEST_PARENT_DATA_REF" 2>/dev/null
+        exit 1
+    fi
+    SUCCESS=1
 fi
 
 ##############################################################################
@@ -57,10 +150,10 @@ import MDAnalysis as mda
 from MDAnalysis.analysis import rms
 import numpy as np
 
-# Load the system
-u = mda.Universe("chignolin.parm7", "output_restart.dcd")
-# Load reference (ensure it has matching CA atoms in same order)
-ref = mda.Universe("${WEST_SIM_ROOT}/common_files/chignolin.pdb")
+# Load the system. topology.parm7 is a per-segment symlink set up at the top
+# of runseg.sh; reference PDB is system-specific via \$SYSTEM_NAME.
+u = mda.Universe("topology.parm7", "output_restart.dcd")
+ref = mda.Universe("${WEST_SIM_ROOT}/common_files/${SYSTEM_NAME}.pdb")
 
 # Select only CA atoms
 mobile_ca = u.select_atoms("name CA")

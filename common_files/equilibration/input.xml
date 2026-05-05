@@ -1,0 +1,83 @@
+<?xml version="1.0" ?>
+<!--
+    Phase 1 GaMD equilibration for chignolin.
+    Generates the seed gamd_restart.checkpoint that ParGaMD WE walkers
+    branch from in iteration 1.
+
+    Step counts match the ParGaMD paper (Sonti974948/ParGaMD cMD/md_cmd.in,
+    AMBER ntcmd=1M, nteb=1M, ntcmdprep=ntebprep=200k, ntave=50k):
+        cMD-prep            200k  (0.4 ns)  - relaxation, no Vstat
+        cMD                 800k  (1.6 ns)  - cMD with Vstat collection
+        GaMD-eq-prep        200k  (0.4 ns)  - pre-boost relaxation
+        GaMD-eq             800k  (1.6 ns)  - boost applied, params refined
+        GaMD-prod           0              - paper has none
+        averaging-window    50k   (0.1 ns)  - rolling avg interval
+
+    dt = 2 fs, σ0_P = σ0_D = 6.0 kcal/mol, T = 300 K, γ = 1.0 ps⁻¹.
+    Total 2M steps = 4 ns wallclock.
+-->
+<gamd>
+    <temperature>300</temperature>
+
+    <system>
+        <nonbonded-method>PME</nonbonded-method>
+        <nonbonded-cutoff>0.9</nonbonded-cutoff>
+        <constraints>HBonds</constraints>
+    </system>
+
+    <barostat>
+        <pressure>1.0</pressure>
+        <frequency>25</frequency>
+    </barostat>
+
+    <run-minimization>True</run-minimization>
+
+    <integrator>
+        <algorithm>langevin</algorithm>
+        <boost-type>upper-dual</boost-type>
+        <sigma0>
+            <primary>6.0</primary>
+            <secondary>6.0</secondary>
+        </sigma0>
+        <random-seed>10</random-seed>
+        <dt>0.002</dt>
+        <friction-coefficient>1.0</friction-coefficient>
+        <number-of-steps>
+            <conventional-md-prep>200000</conventional-md-prep>
+            <conventional-md>800000</conventional-md>
+            <gamd-equilibration-prep>200000</gamd-equilibration-prep>
+            <gamd-equilibration>800000</gamd-equilibration>
+            <gamd-production>0</gamd-production>
+            <extension-steps>0</extension-steps>
+            <averaging-window-interval>50000</averaging-window-interval>
+        </number-of-steps>
+    </integrator>
+
+    <input-files>
+        <!--
+            Generic names. Symlinks topology.parm7 and coordinates.rst7
+            in this dir point at common_files/${SYSTEM_NAME}.{parm7,rst7}.
+            For a new system, re-aim those symlinks; this XML is reusable.
+        -->
+        <amber>
+            <topology>topology.parm7</topology>
+            <coordinates type="rst7">coordinates.rst7</coordinates>
+        </amber>
+    </input-files>
+
+    <outputs>
+        <directory>./out</directory>
+        <overwrite-output>True</overwrite-output>
+        <reporting>
+            <energy>
+                <interval>5000</interval>
+            </energy>
+            <coordinates>
+                <file-type>dcd</file-type>
+            </coordinates>
+            <statistics>
+                <interval>5000</interval>
+            </statistics>
+        </reporting>
+    </outputs>
+</gamd>

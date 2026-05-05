@@ -1,21 +1,27 @@
 #!/bin/bash
 ##############################################################################
-# Example MDAnalysis-based driver script for WESTPA to compute:
+# MDAnalysis-based pcoord driver for WESTPA. Computes:
 #   - RMSD of CA atoms (mass-weighted, best-fit alignment)
 #   - Radius of gyration of CA atoms (mass-weighted)
 #
-# Assumptions/Requirements:
-#   1) In each segment directory ($WEST_CURRENT_SEG_DATA_REF), you have:
-#        output_restart.dcd  -> The trajectory frames for that segment
-#   2) The absolute paths below for chignolin.parm7 and chignolin.pdb
-#      are valid on your HPC system.
-#   3) MDAnalysis is available in your Python environment.
+# Called by WESTPA for both basis states (single-frame .rst7) and any
+# externally-supplied structures. Per-segment pcoords are produced
+# directly by runseg.sh, so this script primarily serves bstates.
 #
-# WESTPA Environment Variables:
-#   - $WEST_CURRENT_SEG_DATA_REF : Path to this segment's directory
-#   - $WEST_PCOORD_RETURN        : Where to write RMSD/Rg data
-#   - $SEG_DEBUG (optional)      : If set, script prints debug info
+# Inputs (in $WEST_STRUCT_DATA_REF):
+#   - output_restart.dcd  -> trajectory (preferred if present)
+#   - output_restart.rst7 -> single-frame restart (basis state fallback)
+#
+# Topology and reference structure are pulled from $WEST_SIM_ROOT/common_files.
 ##############################################################################
+
+# Source env.sh defensively so manual invocations (e.g. pre-flight pcoord
+# checks before w_init) get SYSTEM_NAME and the conda env without the user
+# having to source it themselves. Under WESTPA the env is already inherited
+# from run_local.sh, but sourcing again is idempotent.
+if [ -n "$WEST_SIM_ROOT" ] && [ -f "$WEST_SIM_ROOT/env.sh" ]; then
+    source "$WEST_SIM_ROOT/env.sh"
+fi
 
 # 1. Optionally enable debugging
 if [ -n "$SEG_DEBUG" ]; then
@@ -37,20 +43,33 @@ RG_FILE=$(mktemp --tmpdir rg_XXXX.xvg)
 cat << EOF > mdanalysis_rmsd_rg.py
 #!/usr/bin/env python
 
+import os
 import MDAnalysis as mda
 import numpy as np
 from MDAnalysis.analysis import rms
 
-# Absolute paths to your HPC reference/topology files:
-topology = "/scratch/10597/anugrahat/pargamd/ParGaMD_chig_2/common_files/chignolin.parm7"
-ref_pdb  = "/scratch/10597/anugrahat/pargamd/ParGaMD_chig_2/common_files/chignolin.pdb"
+sim_root = os.environ["WEST_SIM_ROOT"]
+# Hard error if SYSTEM_NAME is unset rather than silently defaulting to
+# chignolin — a missing SYSTEM_NAME used to mask system swaps and produce
+# misleading "atom count mismatch" failures against the chignolin topology.
+sys_name = os.environ["SYSTEM_NAME"]
+topology = os.path.join(sim_root, "common_files", f"{sys_name}.parm7")
+ref_pdb  = os.path.join(sim_root, "common_files", f"{sys_name}.pdb")
 
-# Trajectory is local to this segment directory
-trajectory = "output_restart.dcd"
+# Prefer the segment trajectory; fall back to the basis-state restart.
+# MDAnalysis cannot infer the AMBER restart format from the .rst7 extension,
+# so we pass format="INPCRD" explicitly when loading the .rst7.
+if os.path.exists("output_restart.dcd"):
+    u = mda.Universe(topology, "output_restart.dcd")
+elif os.path.exists("output_restart.rst7"):
+    u = mda.Universe(topology, "output_restart.rst7", format="INPCRD")
+else:
+    raise FileNotFoundError(
+        "Neither output_restart.dcd nor output_restart.rst7 found in "
+        + os.getcwd()
+    )
 
-# Load the reference and the simulation trajectory
 ref = mda.Universe(ref_pdb)
-u   = mda.Universe(topology, trajectory)
 
 # Select CA atoms
 ref_ca    = ref.select_atoms("name CA")

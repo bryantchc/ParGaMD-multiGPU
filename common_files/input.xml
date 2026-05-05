@@ -1,6 +1,6 @@
 <?xml version="1.0" ?>
 <gamd>
-    <temperature>310</temperature> <!-- unit.kelvin -->
+    <temperature>300</temperature> <!-- unit.kelvin (paper: chignolin runs at 300 K) -->
 
     <system>
         <nonbonded-method>PME</nonbonded-method>
@@ -13,16 +13,17 @@
         <frequency>25</frequency>
     </barostat>
     
-    <run-minimization>False</run-minimization>
+    <run-minimization>True</run-minimization>
 
     <integrator>
         <algorithm>langevin</algorithm>
         <boost-type>upper-dual</boost-type>
         <sigma0>
-            <primary>3.0</primary> <!-- unit.kilocalories_per_mole -->
-            <secondary>3.0</secondary> <!-- unit.kilocalories_per_mole -->
+            <primary>6.0</primary> <!-- unit.kilocalories_per_mole (paper: σ0_P = 6.0 kcal/mol) -->
+            <secondary>6.0</secondary> <!-- unit.kilocalories_per_mole (paper: σ0_D = 6.0 kcal/mol) -->
         </sigma0>
-	<random-seed>10</random-seed>
+	<random-seed>0</random-seed>  <!-- 0 = OpenMM auto-seeds each Context (each segment gets a unique seed). 10 was upstream's testing override. -->
+
         <dt>0.002</dt> <!-- unit.picoseconds -->
         <friction-coefficient>1.0</friction-coefficient> <!-- unit.picoseconds**-1 -->
         <number-of-steps>
@@ -38,9 +39,16 @@
     </integrator>
     
     <input-files>
+        <!--
+            Generic in-segment-dir names. runseg.sh symlinks the actual
+            system-specific files (common_files/${SYSTEM_NAME}.parm7 / .rst7)
+            to these names before invoking gamdRunner, so this XML is
+            system-agnostic — to swap systems, change SYSTEM_NAME in env.sh,
+            don't touch this file.
+        -->
         <amber>
-		<topology>/scratch/10597/anugrahat/pargamd/ParGaMD_chig_2/common_files/chignolin.parm7</topology>
-		<coordinates type="rst7">/scratch/10597/anugrahat/pargamd/ParGaMD_chig_2/common_files/chignolin.rst7</coordinates>
+            <topology>topology.parm7</topology>
+            <coordinates type="rst7">coordinates.rst7</coordinates>
         </amber>
     </input-files>
     <outputs>
