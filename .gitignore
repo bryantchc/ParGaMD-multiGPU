@@ -11,6 +11,9 @@ istates/
 # Plots and other run artifacts
 *.png
 
+# ZMQ runtime — master publishes connection info for clients
+west_zmq_info.json
+
 # Python noise
 __pycache__/
 *.py[cod]
