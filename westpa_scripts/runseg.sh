@@ -74,7 +74,48 @@ for attempt in $(seq 1 $MAX_RETRIES); do
         echo "[runseg] iter=$WEST_CURRENT_ITER seg=$WEST_CURRENT_SEG_ID attempt=$attempt with random-seed=$SEED" >&2
     fi
 
-    python "$GAMD_RUNNER" -p CUDA -r xml input.xml
+    # If TARGET_GPU is set (by run_local.sh's per-worker spawn), pass the
+    # device index to gamdRunner directly via -d. This keeps every worker's
+    # CUDA_VISIBLE_DEVICES unrestricted (e.g. "0,1") so the driver and any
+    # shared MPS daemon see a unified namespace across all worker processes,
+    # while still routing each segment to its assigned physical GPU.
+    GAMD_GPU_FLAG=""
+    if [ -n "${TARGET_GPU:-}" ]; then
+        GAMD_GPU_FLAG="-d $TARGET_GPU"
+    fi
+    # CUDA context-creation serialization. On Blackwell with concurrent
+    # gamdRunner processes spanning multiple GPUs, simultaneous CUDA context
+    # init triggers OverflowError in Context_setStepCount (cousin to the
+    # CUDA_ERROR_NOT_FOUND that REST2 sees and mitigates with launch
+    # staggering). We hold a global flock for ~CUDA_INIT_HOLD_S seconds
+    # while gamdRunner does its context init in the background, then
+    # release. The simulation itself continues in parallel (lock is held
+    # only for the init window), so steady-state throughput is preserved;
+    # the lock just spaces out the simultaneous context creations.
+    : "${CUDA_INIT_HOLD_S:=1.0}"
+    : "${CUDA_INIT_LOCK:=/tmp/pargamd-cuda-init.lock}"
+    GAMD_OUT="gamdRunner_attempt${attempt}.out"
+    exec {LOCKFD}>"$CUDA_INIT_LOCK"
+    flock -x "$LOCKFD"
+    python "$GAMD_RUNNER" -p CUDA $GAMD_GPU_FLAG -r xml input.xml > "$GAMD_OUT" 2>&1 &
+    GAMD_PID=$!
+    sleep "$CUDA_INIT_HOLD_S"
+    flock -u "$LOCKFD"
+    exec {LOCKFD}>&-
+    # gamdRunner is now past context init; wait for it to finish the rest
+    # of the simulation outside the critical section.
+    wait "$GAMD_PID"
+
+    # Blackwell multi-GPU short-circuit: this specific error is environmental
+    # (concurrent CUDA contexts across GPUs corrupt loadCheckpoint deserialization)
+    # and is byte-identical across retries — different random seeds don't help
+    # because the failure is *before* integration starts. Burning two more
+    # attempts just adds ~6 s of wasted lock-contended GPU time per frozen seg
+    # and amplifies the cross-GPU concurrency pressure for everyone else.
+    if grep -q "OverflowError.*Context_setStepCount" "$GAMD_OUT" 2>/dev/null; then
+        echo "[runseg] iter=$WEST_CURRENT_ITER seg=$WEST_CURRENT_SEG_ID attempt=$attempt: Blackwell multi-GPU OverflowError; skipping remaining retries" >&2
+        break
+    fi
 
     # Stricter validity check than `-s`: a late-NaN gamdRunner can write a
     # DCD header (~96 bytes) plus a frame or two before crashing, producing

@@ -96,14 +96,25 @@ if [ "$USE_MPS" = "auto" ]; then
 fi
 
 if [ "$USE_MPS" = "2" ]; then
-    if [ ! -S /tmp/nvidia-mps/control ]; then
-        echo "[run_local] USE_MPS=2 but /tmp/nvidia-mps/control is missing." >&2
-        echo "[run_local] Start the daemon: sudo nvidia-cuda-mps-control -d" >&2
+    # Per-GPU sudo MPS pipe dirs preferred (when /tmp/nvidia-mps-${gpuid}/control
+    # exists for every visible GPU). Falls back to a single shared daemon at
+    # /tmp/nvidia-mps if those aren't present.
+    PER_GPU_MPS=1
+    for gpuid in "${DEVICES[@]}"; do
+        [ -S "/tmp/nvidia-mps-${gpuid}/control" ] || PER_GPU_MPS=0
+    done
+    if [ "$PER_GPU_MPS" = "1" ]; then
+        echo "[run_local] using per-GPU sudo MPS daemons (/tmp/nvidia-mps-{${CUDA_VISIBLE_DEVICES}})"
+        # CUDA_MPS_PIPE_DIRECTORY will be set per-worker in the spawn loop below.
+    elif [ -S /tmp/nvidia-mps/control ]; then
+        export CUDA_MPS_PIPE_DIRECTORY=/tmp/nvidia-mps
+        export CUDA_MPS_LOG_DIRECTORY=/tmp/nvidia-log
+        echo "[run_local] using shared sudo-mode MPS at $CUDA_MPS_PIPE_DIRECTORY"
+    else
+        echo "[run_local] USE_MPS=2 but no sudo daemon found at /tmp/nvidia-mps or /tmp/nvidia-mps-{0,1,...}." >&2
+        echo "[run_local] Start a daemon: sudo nvidia-cuda-mps-control -d" >&2
         exit 1
     fi
-    export CUDA_MPS_PIPE_DIRECTORY=/tmp/nvidia-mps
-    export CUDA_MPS_LOG_DIRECTORY=/tmp/nvidia-log
-    echo "[run_local] using existing sudo-mode MPS at $CUDA_MPS_PIPE_DIRECTORY"
 elif [ "$USE_MPS" = "1" ]; then
     echo "[run_local] USE_MPS=1 (user-mode) is broken on Blackwell. Use sudo MPS (=2) instead." >&2
     exit 1
@@ -162,6 +173,18 @@ cleanup() {
         kill -TERM "$wpid" 2>/dev/null || true
     done
     [ -n "$LOG_PID" ] && kill "$LOG_PID" 2>/dev/null || true
+
+    # Reap orphaned per-segment children. When a worker dies hard, its
+    # runseg.sh + python gamdRunner descendants get reparented to init
+    # and end up stuck on the MPS Unix socket (__skb_wait_for_more_packets);
+    # only SIGKILL clears them. Scope by $WEST_SIM_ROOT so we don't touch
+    # unrelated processes on the host.
+    pkill -KILL -f "$WEST_SIM_ROOT/westpa_scripts/runseg.sh" 2>/dev/null || true
+    pkill -KILL -f "$WEST_SIM_ROOT/common_files/gamdRunner"  2>/dev/null || true
+
+    # Clear stale runtime files so the next launch starts clean.
+    rm -f "$SERVER_INFO" /tmp/pargamd-cuda-init.lock 2>/dev/null || true
+
     # USE_MPS=2: do not touch the user-managed sudo daemon.
 }
 trap cleanup EXIT INT TERM
@@ -202,7 +225,13 @@ for gpuid in "${DEVICES[@]}"; do
     n_workers=${WORKERS_PER_GPU[$gpuid]}
     for ((w=1; w<=n_workers; w++)); do
         (
-          export CUDA_VISIBLE_DEVICES="$gpuid"
+          # Unified-namespace approach: workers inherit the master's
+          # CUDA_VISIBLE_DEVICES (e.g. "0,1") so the driver and any single
+          # shared MPS daemon see a consistent device numbering across all
+          # processes. Each worker just signals which physical GPU to target
+          # for the segment via TARGET_GPU; runseg.sh forwards this to
+          # gamdRunner via the -d flag rather than via CUDA_VD restriction.
+          export TARGET_GPU="$gpuid"
           exec w_run --work-manager=zmq \
                      --n-workers=1 \
                      --zmq-mode=client \
