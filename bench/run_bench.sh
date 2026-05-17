@@ -37,7 +37,7 @@ source env.sh
 [ -f "common_files/gamd_restart.checkpoint" ] \
     || { echo "[bench] no common_files/gamd_restart.checkpoint — run equilibration first" >&2; exit 1; }
 
-CONFIGS=${BENCH_CONFIGS:-"4,0 8,0 12,0 0,4 4,4 6,4 8,4 6,6"}
+CONFIGS=${BENCH_CONFIGS:-"4,0 8,0 12,0 16,0 0,4 4,4 6,4 8,4 12,4 12,6 6,6"}
 SEGS_PER_WORKER=${BENCH_SEGS_PER_WORKER:-3}
 SEG_NS=${BENCH_SEG_NS:-0.1}
 USE_MPS=${USE_MPS:-1}
@@ -106,7 +106,10 @@ seed_worker_dir() { # $1 dir
     sed -i 's|<directory>.*</directory>|<directory>.</directory>|' "$d/input.xml"
 }
 
-# Runs in a subshell ( ... ) & — exit status surfaces as wait's $?
+# Runs in a subshell ( ... ) & — exit status surfaces as wait's $?.
+# Writes its own elapsed seconds to .elapsed in $1 so the aggregator can
+# compute per-worker throughput (the "WE keeps every worker fed" upper
+# bound) in addition to the wall-clock-to-last-worker metric.
 run_worker() { # $1 dir  $2 mps_pipe ("" if no MPS)
     cd "$1"
     if [ -n "$2" ]; then
@@ -115,6 +118,7 @@ run_worker() { # $1 dir  $2 mps_pipe ("" if no MPS)
         # Daemon exposes its 1 GPU as device index 0 in client namespace.
         export CUDA_VISIBLE_DEVICES=0
     fi
+    local t0=$SECONDS
     for ((s=1; s<=SEGS_PER_WORKER; s++)); do
         # Fresh seed each segment → identical work per segment.
         cp "$WEST_SIM_ROOT/common_files/gamd_restart.checkpoint" \
@@ -127,14 +131,23 @@ run_worker() { # $1 dir  $2 mps_pipe ("" if no MPS)
         # gamd.log empty = workaround/fallback path → not a real run
         [ -s gamd.log ] || { echo "FAIL empty-gamd.log seg=$s dir=$1" >&2; return 1; }
     done
+    echo $((SECONDS - t0)) > .elapsed
 }
 
 # ---------------------------------------------------------------------------
 # Sweep
 # ---------------------------------------------------------------------------
-printf "| %-6s | %4s | %4s | %5s | %12s | %14s | %4s |\n" \
-    config W0 W1 wall_s "agg_ns_day" "per_worker" "ok"  | tee "$RESULTS"
-printf "|--------|------|------|-------|--------------|----------------|------|\n" \
+# wall_ns_day:    aggregate from total simulated ns / wall-to-last-worker
+#                 (what you'd see if WE could NOT keep workers fed past
+#                 their assigned segments — pessimistic / lower bound).
+# fed_ns_day:     sum of per-worker (own_segs × seg_ns / own_elapsed),
+#                 i.e. each worker's intrinsic rate × N workers (what WE
+#                 production should approach if it keeps every worker
+#                 fed — optimistic / upper bound).
+# Real production lands between these, typically near fed_ns_day.
+printf "| %-6s | %4s | %4s | %5s | %5s | %12s | %12s | %4s |\n" \
+    config W0 W1 g0_s g1_s "wall_ns_day" "fed_ns_day" "ok" | tee "$RESULTS"
+printf "|--------|------|------|-------|-------|--------------|--------------|------|\n" \
     | tee -a "$RESULTS"
 
 for cfg in $CONFIGS; do
@@ -168,17 +181,30 @@ for cfg in $CONFIGS; do
     start=$SECONDS
     for p in "${pids[@]}"; do wait "$p" && OK=$((OK+1)) || true; done
     wall=$((SECONDS - start))
-    [ "$wall" -lt 1 ] && wall=1   # avoid div-by-zero on tiny runs
+    [ "$wall" -lt 1 ] && wall=1
 
-    # Aggregate ns/day only counts succeeded workers — failed ones produced
-    # no real simulation. per_worker normalizes by total to penalize configs
-    # with many failures.
-    agg_ns_done=$(awk "BEGIN { print $OK * $SEGS_PER_WORKER * $SEG_NS }")
-    agg_nsday=$(awk "BEGIN { printf \"%.1f\", $agg_ns_done * 86400 / $wall }")
-    per_w=$(awk "BEGIN { printf \"%.1f\", $agg_ns_done * 86400 / $wall / $TOTAL }")
+    # Per-GPU max elapsed (= when last worker on that GPU finished). Shows
+    # the GPU 0 vs GPU 1 finish-time gap that drives the wall_ns_day vs
+    # fed_ns_day delta.
+    g0_max=0; g1_max=0; fed_ns_day_sum=0
+    wi=0
+    for ((w=1; w<=W0; w++)); do
+        wi=$((wi+1)); el=$(cat "$cdir/w$wi/.elapsed" 2>/dev/null || echo 0)
+        [ "$el" -gt "$g0_max" ] && g0_max=$el
+        [ "$el" -gt 0 ] && fed_ns_day_sum=$(awk "BEGIN{print $fed_ns_day_sum + $SEGS_PER_WORKER * $SEG_NS * 86400 / $el}")
+    done
+    for ((w=1; w<=W1; w++)); do
+        wi=$((wi+1)); el=$(cat "$cdir/w$wi/.elapsed" 2>/dev/null || echo 0)
+        [ "$el" -gt "$g1_max" ] && g1_max=$el
+        [ "$el" -gt 0 ] && fed_ns_day_sum=$(awk "BEGIN{print $fed_ns_day_sum + $SEGS_PER_WORKER * $SEG_NS * 86400 / $el}")
+    done
 
-    printf "| %-6s | %4d | %4d | %5d | %12s | %14s | %d/%d |\n" \
-        "$cfg" "$W0" "$W1" "$wall" "$agg_nsday" "$per_w" "$OK" "$TOTAL" \
+    agg_ns_done=$(awk "BEGIN{print $OK * $SEGS_PER_WORKER * $SEG_NS}")
+    wall_nsday=$(awk "BEGIN{printf \"%.1f\", $agg_ns_done * 86400 / $wall}")
+    fed_nsday=$(awk "BEGIN{printf \"%.1f\", $fed_ns_day_sum}")
+
+    printf "| %-6s | %4d | %4d | %5d | %5d | %12s | %12s | %d/%d |\n" \
+        "$cfg" "$W0" "$W1" "$g0_max" "$g1_max" "$wall_nsday" "$fed_nsday" "$OK" "$TOTAL" \
         | tee -a "$RESULTS"
 done
 
