@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+# bench/run_bench.sh — sweep (WORKERS_GPU0, WORKERS_GPU1) distributions and
+# report aggregate GaMD throughput for each. Use this AFTER ./init.sh (or
+# the equivalent) has produced common_files/gamd_restart.checkpoint, before
+# launching a long production run, to pick the worker split that maximizes
+# ns/day for your system on this hardware.
+#
+# Each worker runs gamdRunner directly (no WESTPA, no walker tree) against
+# its own scratch dir seeded with the same checkpoint run_local.sh's iter 1
+# would use. The seed checkpoint is restored before each segment so every
+# worker does identical work — that makes the throughput comparison fair.
+#
+# Knobs (env):
+#   BENCH_CONFIGS         space-separated "W0,W1" tuples to sweep
+#                         default: a reasonable sweep on a 5090+5070 box
+#   BENCH_SEGS_PER_WORKER N gamdRunner invocations per worker per config
+#                         default: 3 (≈1 min per config on the 5090)
+#   BENCH_SEG_NS          per-segment simulated ns (must match input.xml's
+#                         extension-steps × dt). default: 0.1 (= 100 ps)
+#   USE_MPS               1 (per-GPU user-mode, default) or 0 (no MPS)
+#
+# Output: a markdown-style table to stdout AND to bench/run-<ts>/results.txt.
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Setup
+# ---------------------------------------------------------------------------
+cd "$(dirname "$(readlink -f "$0")")/.."
+WEST_SIM_ROOT="$PWD"
+export WEST_SIM_ROOT
+# shellcheck disable=SC1091
+source env.sh
+: "${SYSTEM_NAME:?SYSTEM_NAME is unset; check env.sh}"
+[ -f "common_files/${SYSTEM_NAME}.parm7" ] \
+    || { echo "[bench] no common_files/${SYSTEM_NAME}.parm7" >&2; exit 1; }
+[ -f "common_files/gamd_restart.checkpoint" ] \
+    || { echo "[bench] no common_files/gamd_restart.checkpoint — run equilibration first" >&2; exit 1; }
+
+CONFIGS=${BENCH_CONFIGS:-"4,0 8,0 12,0 0,4 4,4 6,4 8,4 6,6"}
+SEGS_PER_WORKER=${BENCH_SEGS_PER_WORKER:-3}
+SEG_NS=${BENCH_SEG_NS:-0.1}
+USE_MPS=${USE_MPS:-1}
+
+BENCH_DIR="bench/run-$(date +%s)"
+mkdir -p "$BENCH_DIR"
+RESULTS="$BENCH_DIR/results.txt"
+
+# Single-threaded per worker — same as run_local.sh
+export OPENMM_CPU_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
+
+echo "[bench] sim root:           $WEST_SIM_ROOT"
+echo "[bench] system:             $SYSTEM_NAME"
+echo "[bench] segs per worker:    $SEGS_PER_WORKER"
+echo "[bench] ns per segment:     $SEG_NS"
+echo "[bench] configs to sweep:   $CONFIGS"
+echo "[bench] MPS mode:           $USE_MPS"
+echo "[bench] scratch + results:  $BENCH_DIR"
+echo
+
+# ---------------------------------------------------------------------------
+# MPS daemon lifecycle (per-GPU user-mode, same recipe as run_local.sh)
+# ---------------------------------------------------------------------------
+start_mps() { # $1 gpuid
+    local pipe="/tmp/nvidia-mps-$USER-$1" logd="/tmp/nvidia-log-$USER-$1"
+    mkdir -p "$pipe" "$logd"
+    CUDA_VISIBLE_DEVICES="$1" CUDA_MPS_PIPE_DIRECTORY="$pipe" \
+        CUDA_MPS_LOG_DIRECTORY="$logd" nvidia-cuda-mps-control -d
+    for _ in {1..10}; do [ -S "$pipe/control" ] && break; sleep 0.5; done
+}
+stop_all_mps() {
+    for g in 0 1; do
+        local pipe="/tmp/nvidia-mps-$USER-$g"
+        [ -d "$pipe" ] || continue
+        echo quit | CUDA_MPS_PIPE_DIRECTORY="$pipe" nvidia-cuda-mps-control 2>/dev/null || true
+    done
+}
+set_thread_pct() { # $1 gpuid  $2 pct
+    echo "set_default_active_thread_percentage $2" \
+        | CUDA_MPS_PIPE_DIRECTORY="/tmp/nvidia-mps-$USER-$1" \
+            nvidia-cuda-mps-control >/dev/null
+}
+
+# Clean up daemons + any straggler bench gamdRunners on exit
+cleanup_bench() {
+    [ "$USE_MPS" = "1" ] && stop_all_mps
+    pkill -KILL -f "$BENCH_DIR/" 2>/dev/null || true
+}
+trap cleanup_bench EXIT INT TERM
+
+if [ "$USE_MPS" = "1" ]; then
+    for g in 0 1; do start_mps "$g"; done
+fi
+
+# ---------------------------------------------------------------------------
+# Per-worker scratch + driver
+# ---------------------------------------------------------------------------
+seed_worker_dir() { # $1 dir
+    local d="$1"
+    mkdir -p "$d"
+    ln -sf "$WEST_SIM_ROOT/common_files/$SYSTEM_NAME.parm7" "$d/topology.parm7"
+    ln -sf "$WEST_SIM_ROOT/common_files/$SYSTEM_NAME.rst7" "$d/coordinates.rst7"
+    ln -sf "$WEST_SIM_ROOT/common_files/gamd-restart.dat"   "$d/gamd-restart.dat"
+    cp    "$WEST_SIM_ROOT/common_files/input.xml"           "$d/input.xml"
+    # Point gamdRunner's output dir at the scratch dir itself.
+    sed -i 's|<directory>.*</directory>|<directory>.</directory>|' "$d/input.xml"
+}
+
+# Runs in a subshell ( ... ) & — exit status surfaces as wait's $?
+run_worker() { # $1 dir  $2 mps_pipe ("" if no MPS)
+    cd "$1"
+    if [ -n "$2" ]; then
+        export CUDA_MPS_PIPE_DIRECTORY="$2"
+        export CUDA_MPS_LOG_DIRECTORY="${2/nvidia-mps/nvidia-log}"
+        # Daemon exposes its 1 GPU as device index 0 in client namespace.
+        export CUDA_VISIBLE_DEVICES=0
+    fi
+    for ((s=1; s<=SEGS_PER_WORKER; s++)); do
+        # Fresh seed each segment → identical work per segment.
+        cp "$WEST_SIM_ROOT/common_files/gamd_restart.checkpoint" \
+           gamd_restart.checkpoint
+        if ! python "$WEST_SIM_ROOT/common_files/gamdRunner" \
+                -p CUDA -d 0 -r xml input.xml > "seg${s}.out" 2>&1; then
+            echo "FAIL seg=$s dir=$1" >&2
+            return 1
+        fi
+        # gamd.log empty = workaround/fallback path → not a real run
+        [ -s gamd.log ] || { echo "FAIL empty-gamd.log seg=$s dir=$1" >&2; return 1; }
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Sweep
+# ---------------------------------------------------------------------------
+printf "| %-6s | %4s | %4s | %5s | %12s | %14s | %4s |\n" \
+    config W0 W1 wall_s "agg_ns_day" "per_worker" "ok"  | tee "$RESULTS"
+printf "|--------|------|------|-------|--------------|----------------|------|\n" \
+    | tee -a "$RESULTS"
+
+for cfg in $CONFIGS; do
+    W0=${cfg%,*}; W1=${cfg#*,}
+    TOTAL=$((W0+W1))
+    [ "$TOTAL" -eq 0 ] && continue
+    [ "$W0" -gt 0 ] || [ "$W1" -gt 0 ] || continue
+
+    # Per-GPU MPS thread share = 100% / (workers on that GPU)
+    if [ "$USE_MPS" = "1" ]; then
+        [ "$W0" -gt 0 ] && set_thread_pct 0 $((100/W0))
+        [ "$W1" -gt 0 ] && set_thread_pct 1 $((100/W1))
+    fi
+
+    cdir="$BENCH_DIR/${W0}_${W1}"
+    rm -rf "$cdir"; mkdir -p "$cdir"
+    for ((w=1; w<=TOTAL; w++)); do seed_worker_dir "$cdir/w$w"; done
+
+    PIPE0="/tmp/nvidia-mps-$USER-0"
+    PIPE1="/tmp/nvidia-mps-$USER-1"
+    [ "$USE_MPS" = "1" ] || { PIPE0=""; PIPE1=""; }
+
+    pids=(); wi=0; OK=0
+    for ((w=1; w<=W0; w++)); do
+        wi=$((wi+1)); ( run_worker "$cdir/w$wi" "$PIPE0" ) & pids+=($!)
+    done
+    for ((w=1; w<=W1; w++)); do
+        wi=$((wi+1)); ( run_worker "$cdir/w$wi" "$PIPE1" ) & pids+=($!)
+    done
+
+    start=$SECONDS
+    for p in "${pids[@]}"; do wait "$p" && OK=$((OK+1)) || true; done
+    wall=$((SECONDS - start))
+    [ "$wall" -lt 1 ] && wall=1   # avoid div-by-zero on tiny runs
+
+    # Aggregate ns/day only counts succeeded workers — failed ones produced
+    # no real simulation. per_worker normalizes by total to penalize configs
+    # with many failures.
+    agg_ns_done=$(awk "BEGIN { print $OK * $SEGS_PER_WORKER * $SEG_NS }")
+    agg_nsday=$(awk "BEGIN { printf \"%.1f\", $agg_ns_done * 86400 / $wall }")
+    per_w=$(awk "BEGIN { printf \"%.1f\", $agg_ns_done * 86400 / $wall / $TOTAL }")
+
+    printf "| %-6s | %4d | %4d | %5d | %12s | %14s | %d/%d |\n" \
+        "$cfg" "$W0" "$W1" "$wall" "$agg_nsday" "$per_w" "$OK" "$TOTAL" \
+        | tee -a "$RESULTS"
+done
+
+echo
+echo "[bench] full table also in $RESULTS"
