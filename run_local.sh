@@ -10,8 +10,16 @@
 #     with the master's host info shared via $SERVER_INFO on a shared FS
 #
 # Override defaults via env:
-#   WORKERS_GPU0=8 WORKERS_GPU1=4 ./run_local.sh
-#   USE_MPS=2 CUDA_VISIBLE_DEVICES=0,1 ./run_local.sh
+#   WORKERS_GPU0=8 WORKERS_GPU1=4 ./run_local.sh             # default MPS=auto
+#   USE_MPS=1 CUDA_VISIBLE_DEVICES=0,1 ./run_local.sh        # preferred multi-GPU
+#   USE_MPS=2 CUDA_VISIBLE_DEVICES=0,1 ./run_local.sh        # requires sudo daemon
+#
+# Multi-GPU verdict (consumer Blackwell, RTX 5090 + 5070):
+#   USE_MPS=1 is preferred. It starts one user-mode MPS daemon per GPU at
+#   /tmp/nvidia-mps-$USER-$GPUID and pins each worker to its own daemon.
+#   No cross-GPU MPS routing ambiguity (which the shared sudo daemon at
+#   /tmp/nvidia-mps suffers from), and we verified both GPUs at 100% peak
+#   util under load. See BLACKWELL_NOTES.md for the full story.
 #
 # Restart-safe: only calls init.sh if west.h5 is missing.
 # Trap-based cleanup: SIGINT to master and workers; sudo MPS untouched.
@@ -27,11 +35,16 @@ WORKERS_GPU0=${WORKERS_GPU0:-8}            # 5090 (32 GB) — chignolin uses ~30
 WORKERS_GPU1=${WORKERS_GPU1:-4}            # 5070 (12 GB) — fewer walkers, lower per-GPU memory
 CONDA_ENV=${CONDA_ENV:-pargamd}
 
-# MPS modes (same as single-host processes launcher):
-#   USE_MPS=auto  detect /tmp/nvidia-mps; use it if alive, else no-MPS
-#   USE_MPS=0     no MPS (workers serialize on each GPU)
-#   USE_MPS=2     require external sudo-mode MPS daemon at /tmp/nvidia-mps
-#   USE_MPS=1     user-mode MPS — DO NOT USE on Blackwell (gamdRunner OverflowError)
+# MPS modes:
+#   USE_MPS=auto  detect /tmp/nvidia-mps; use it if alive (=2), else =0
+#   USE_MPS=0     no MPS (workers serialize on each GPU; very slow)
+#   USE_MPS=1     RECOMMENDED for multi-GPU. Script starts one user-mode
+#                 daemon per visible GPU at /tmp/nvidia-mps-$USER-$GPUID;
+#                 each worker is pinned to its GPU's daemon. Gives true
+#                 multi-GPU execution with no MPS routing ambiguity.
+#   USE_MPS=2     external sudo daemon at /tmp/nvidia-mps. Works but may
+#                 route all "GPU 1" work to GPU 0 under load (one shared
+#                 server per uid). Fine for single-GPU; suspect for multi.
 USE_MPS=${USE_MPS:-auto}
 
 # ZMQ heartbeat tuning (inherited if set in env.sh)
@@ -116,8 +129,36 @@ if [ "$USE_MPS" = "2" ]; then
         exit 1
     fi
 elif [ "$USE_MPS" = "1" ]; then
-    echo "[run_local] USE_MPS=1 (user-mode) is broken on Blackwell. Use sudo MPS (=2) instead." >&2
-    exit 1
+    # User-mode MPS: this script starts one daemon per visible GPU at
+    # /tmp/nvidia-mps-$USER-$GPUID. Each worker picks the pipe dir for its
+    # TARGET_GPU in the spawn loop below, so kernels route to a daemon that
+    # only knows about that physical GPU (no cross-GPU MPS routing
+    # ambiguity).
+    #
+    # Was previously hard-disabled with the comment "broken on Blackwell"
+    # because we attributed the OverflowError-in-setStepCount to user-mode
+    # MPS context creation. We now know that error is a GPU-side scalar
+    # readback corruption fixed by the stepCount workaround in
+    # common_files/gamd/runners.py, so user-mode MPS is back on the table.
+    start_mps() {  # $1 gpuid  $2 thread%
+        local pipe="/tmp/nvidia-mps-$USER-$1"
+        local logd="/tmp/nvidia-log-$USER-$1"
+        mkdir -p "$pipe" "$logd"
+        CUDA_VISIBLE_DEVICES="$1" CUDA_MPS_PIPE_DIRECTORY="$pipe" \
+            CUDA_MPS_LOG_DIRECTORY="$logd" nvidia-cuda-mps-control -d
+        for _ in {1..10}; do [ -S "$pipe/control" ] && break; sleep 0.5; done
+        echo "set_default_active_thread_percentage $2" \
+            | CUDA_MPS_PIPE_DIRECTORY="$pipe" nvidia-cuda-mps-control >/dev/null
+    }
+    for gpuid in "${DEVICES[@]}"; do
+        nw=${WORKERS_PER_GPU[$gpuid]}
+        thread_pct=$(( nw > 0 ? 100 / nw : 100 ))
+        echo "[run_local] starting user-mode MPS on GPU $gpuid (thread%=$thread_pct)"
+        start_mps "$gpuid" "$thread_pct"
+    done
+    # Don't export a global CUDA_MPS_PIPE_DIRECTORY — workers set it per-GPU
+    # in the spawn loop. Make sure no inherited value leaks in.
+    unset CUDA_MPS_PIPE_DIRECTORY CUDA_MPS_LOG_DIRECTORY 2>/dev/null || true
 else
     unset CUDA_MPS_PIPE_DIRECTORY CUDA_MPS_LOG_DIRECTORY 2>/dev/null || true
 fi
@@ -185,7 +226,15 @@ cleanup() {
     # Clear stale runtime files so the next launch starts clean.
     rm -f "$SERVER_INFO" /tmp/pargamd-cuda-init.lock 2>/dev/null || true
 
-    # USE_MPS=2: do not touch the user-managed sudo daemon.
+    # USE_MPS=1: stop our per-GPU user-mode daemons. USE_MPS=2: leave the
+    # user-managed sudo daemon alone.
+    if [ "$USE_MPS" = "1" ]; then
+        for gpuid in "${DEVICES[@]}"; do
+            local pipe="/tmp/nvidia-mps-$USER-$gpuid"
+            [ -d "$pipe" ] || continue
+            echo quit | CUDA_MPS_PIPE_DIRECTORY="$pipe" nvidia-cuda-mps-control 2>/dev/null || true
+        done
+    fi
 }
 trap cleanup EXIT INT TERM
 
@@ -231,7 +280,35 @@ for gpuid in "${DEVICES[@]}"; do
           # processes. Each worker just signals which physical GPU to target
           # for the segment via TARGET_GPU; runseg.sh forwards this to
           # gamdRunner via the -d flag rather than via CUDA_VD restriction.
-          export TARGET_GPU="$gpuid"
+          # Per-GPU MPS pipe routing: under USE_MPS=1 (per-GPU user-mode
+          # daemons) and USE_MPS=2 with per-GPU sudo daemons at
+          # /tmp/nvidia-mps-${gpuid}, point each worker at the daemon for
+          # its physical GPU. Otherwise leave the global setting (shared
+          # sudo daemon at /tmp/nvidia-mps, or no MPS).
+          #
+          # Per-GPU MPS daemons were started with CUDA_VISIBLE_DEVICES=$gpuid,
+          # so each daemon exposes only ONE device, renumbered as device
+          # index 0 in client space. Restrict the worker's CVD to match
+          # and target device 0 (=this daemon's only physical GPU).
+          # For the shared MPS=2 daemon (sees both GPUs), keep the global
+          # CVD=0,1 and target device $gpuid as usual.
+          if [ "$USE_MPS" = "1" ]; then
+              export CUDA_MPS_PIPE_DIRECTORY="/tmp/nvidia-mps-$USER-$gpuid"
+              export CUDA_MPS_LOG_DIRECTORY="/tmp/nvidia-log-$USER-$gpuid"
+              # Daemon was started with CVD=$gpuid → exposes its 1 GPU as
+              # device index 0 in client namespace. Client CVD must match
+              # that renumbered index (NOT the host's physical $gpuid),
+              # otherwise driver returns CUDA_ERROR_NO_DEVICE.
+              export CUDA_VISIBLE_DEVICES="0"
+              export TARGET_GPU="0"
+          elif [ "$USE_MPS" = "2" ] && [ -S "/tmp/nvidia-mps-${gpuid}/control" ]; then
+              export CUDA_MPS_PIPE_DIRECTORY="/tmp/nvidia-mps-${gpuid}"
+              export CUDA_MPS_LOG_DIRECTORY="/tmp/nvidia-log-${gpuid}"
+              export CUDA_VISIBLE_DEVICES="0"
+              export TARGET_GPU="0"
+          else
+              export TARGET_GPU="$gpuid"
+          fi
           exec w_run --work-manager=zmq \
                      --n-workers=1 \
                      --zmq-mode=client \

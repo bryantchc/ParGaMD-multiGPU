@@ -407,11 +407,37 @@ class Runner:
           #  1) Load the old checkpoint
 
             simulation.loadCheckpoint(restart_checkpoint_filename)
-            old_step_count = int(simulation.integrator.getGlobalVariableByName("stepCount"))
+            raw_step_count = simulation.integrator.getGlobalVariableByName("stepCount")
             state = simulation.context.getState(getPositions=True, getVelocities=True)
             state_time = state.getTime().value_in_unit(unit.picoseconds)
             integrator_dt = dt.value_in_unit(unit.picoseconds)
-            #current_step = int(round(state_time / integrator_dt))
+            derived_step_count = int(round(state_time / integrator_dt))
+
+            # GPU-side scalar-readback corruption workaround.
+            # On consumer Blackwell (observed on RTX 5070, sm_120, driver 580.95),
+            # `getGlobalVariableByName("stepCount")` after loadCheckpoint can
+            # return garbage. Two flavors observed:
+            #   - Far out of range (~1e48, ~1e102): overflows long long inside
+            #     Context_setStepCount, raising OverflowError.
+            #   - Subtly wrong (off-by-N in the in-range case): passes
+            #     setStepCount but breaks downstream RunningRates divisor
+            #     checks ("save_rate ... should evenly divide ...").
+            # State (positions/velocities/time) readback is unaffected, so we
+            # always trust state_time as the source of truth and log any
+            # divergence between it and the integrator's readback.
+            import sys
+            try:
+                raw_as_int = int(raw_step_count) if 0 <= raw_step_count < 2**62 else None
+            except (OverflowError, ValueError):
+                raw_as_int = None
+
+            if raw_as_int != derived_step_count:
+                print(f"[WORKAROUND] integrator stepCount readback "
+                      f"({raw_step_count!r} -> {raw_as_int}) differs from "
+                      f"time-derived ({derived_step_count}); using time-derived",
+                      file=sys.stderr)
+                sys.stderr.flush()
+            old_step_count = derived_step_count
             current_step = old_step_count
 
             simulation.currentStep = old_step_count
