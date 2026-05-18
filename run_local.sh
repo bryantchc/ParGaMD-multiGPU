@@ -56,7 +56,10 @@ export WM_ZMQ_MASTER_HEARTBEAT WM_ZMQ_WORKER_HEARTBEAT WM_ZMQ_TIMEOUT_FACTOR
 # ---------------------------------------------------------------------------
 # Environment
 # ---------------------------------------------------------------------------
-cd "$(dirname "$(readlink -f "$0")")"
+# Use BASH_SOURCE (not readlink -f) so symlinks from a run dir into the
+# repo resolve to the RUN DIR (symlink location), not the repo (symlink
+# target). The run dir is what owns env.sh, west.cfg, west.h5, etc.
+cd "$(dirname "${BASH_SOURCE[0]}")"
 export WEST_SIM_ROOT="$PWD"
 SERVER_INFO="$WEST_SIM_ROOT/west_zmq_info.json"
 export SERVER_INFO
@@ -139,14 +142,22 @@ elif [ "$USE_MPS" = "1" ]; then
     # because we attributed the OverflowError-in-setStepCount to user-mode
     # MPS context creation. We now know that error is a GPU-side scalar
     # readback corruption fixed by the stepCount workaround in
-    # common_files/gamd/runners.py, so user-mode MPS is back on the table.
+    # runtime/gamd/runners.py, so user-mode MPS is back on the table.
     start_mps() {  # $1 gpuid  $2 thread%
         local pipe="/tmp/nvidia-mps-$USER-$1"
         local logd="/tmp/nvidia-log-$USER-$1"
         mkdir -p "$pipe" "$logd"
-        CUDA_VISIBLE_DEVICES="$1" CUDA_MPS_PIPE_DIRECTORY="$pipe" \
-            CUDA_MPS_LOG_DIRECTORY="$logd" nvidia-cuda-mps-control -d
-        for _ in {1..10}; do [ -S "$pipe/control" ] && break; sleep 0.5; done
+        # If a leftover daemon from a prior crashed run is still listening
+        # on the pipe, reuse it (the `-d` invocation would fail with
+        # "An instance of this daemon is already running"). Probe with a
+        # cheap get_server_list query.
+        if ! echo get_server_list \
+                 | CUDA_MPS_PIPE_DIRECTORY="$pipe" nvidia-cuda-mps-control \
+                   >/dev/null 2>&1; then
+            CUDA_VISIBLE_DEVICES="$1" CUDA_MPS_PIPE_DIRECTORY="$pipe" \
+                CUDA_MPS_LOG_DIRECTORY="$logd" nvidia-cuda-mps-control -d
+            for _ in {1..10}; do [ -S "$pipe/control" ] && break; sleep 0.5; done
+        fi
         echo "set_default_active_thread_percentage $2" \
             | CUDA_MPS_PIPE_DIRECTORY="$pipe" nvidia-cuda-mps-control >/dev/null
     }
@@ -221,7 +232,7 @@ cleanup() {
     # only SIGKILL clears them. Scope by $WEST_SIM_ROOT so we don't touch
     # unrelated processes on the host.
     pkill -KILL -f "$WEST_SIM_ROOT/westpa_scripts/runseg.sh" 2>/dev/null || true
-    pkill -KILL -f "$WEST_SIM_ROOT/common_files/gamdRunner"  2>/dev/null || true
+    pkill -KILL -f "${PARGAMD_RUNTIME_DIR:-$WEST_SIM_ROOT/runtime}/gamdRunner" 2>/dev/null || true
 
     # Clear stale runtime files so the next launch starts clean.
     rm -f "$SERVER_INFO" /tmp/pargamd-cuda-init.lock 2>/dev/null || true

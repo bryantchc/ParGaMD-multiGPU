@@ -22,17 +22,20 @@ cd "$WEST_CURRENT_SEG_DATA_REF" || exit 1
 ##############################################################################
 # 3) Link necessary files (topology, coords, XML)
 ##############################################################################
-# Honor $SYSTEM_NAME from env.sh (sourced above). Hard error if unset —
-# a silent chignolin fallback used to mask misconfigured swaps.
+# Honor $SYSTEM_NAME / $PARGAMD_{RUNTIME,SYSTEM}_DIR from env.sh (sourced
+# above). Hard error if unset — silent fallbacks used to mask misconfigured
+# swaps.
 # We symlink the system-specific parm7/rst7 to GENERIC names inside the seg
 # dir so input.xml can be system-agnostic (it always references topology.parm7
-# and coordinates.rst7). To swap systems: drop new <name>.{parm7,rst7,pdb}
-# into common_files/ and change SYSTEM_NAME in env.sh.
+# and coordinates.rst7). To swap systems entirely, scaffold a new run dir
+# with new_run.sh --system <other>.
 : "${SYSTEM_NAME:?SYSTEM_NAME is unset; check env.sh}"
-ln -sfv "$WEST_SIM_ROOT/common_files/${SYSTEM_NAME}.parm7" ./topology.parm7
-ln -sfv "$WEST_SIM_ROOT/common_files/${SYSTEM_NAME}.rst7" ./coordinates.rst7
-ln -sfv "$WEST_SIM_ROOT/common_files/gamd-restart.dat" .
-ln -sfv "$WEST_SIM_ROOT/common_files/input.xml" .
+: "${PARGAMD_RUNTIME_DIR:?PARGAMD_RUNTIME_DIR is unset; check env.sh}"
+: "${PARGAMD_SYSTEM_DIR:?PARGAMD_SYSTEM_DIR is unset; check env.sh}"
+ln -sfv "$PARGAMD_SYSTEM_DIR/${SYSTEM_NAME}.parm7" ./topology.parm7
+ln -sfv "$PARGAMD_SYSTEM_DIR/${SYSTEM_NAME}.rst7"  ./coordinates.rst7
+ln -sfv "$WEST_SIM_ROOT/gamd-restart.dat"          ./gamd-restart.dat
+ln -sfv "$WEST_SIM_ROOT/input.xml"                 ./input.xml
 
 # Fix XML output directory to current location
 sed -i 's|<directory>.*</directory>|<directory>.</directory>|' input.xml
@@ -52,8 +55,8 @@ sed -i 's|<directory>.*</directory>|<directory>.</directory>|' input.xml
 #   - Bumping the integrator's <random-seed> in input.xml. Different seeds
 #     are extremely unlikely to all produce NaN from the same parent state.
 #   - Falling out of the loop on first success (non-empty output_restart.dcd).
-GAMD_RUNNER="$WEST_SIM_ROOT/common_files/gamdRunner"
-GAMD_CHECKPOINT_SEED="$WEST_SIM_ROOT/common_files/gamd_restart.checkpoint"
+GAMD_RUNNER="$PARGAMD_RUNTIME_DIR/gamdRunner"
+GAMD_CHECKPOINT_SEED="$WEST_SIM_ROOT/gamd_restart.checkpoint"
 if [ "$WEST_CURRENT_ITER" -eq 1 ]; then
     PARENT_CHECKPOINT="$GAMD_CHECKPOINT_SEED"
 else
@@ -181,7 +184,7 @@ import numpy as np
 # Load the system. topology.parm7 is a per-segment symlink set up at the top
 # of runseg.sh; reference PDB is system-specific via \$SYSTEM_NAME.
 u = mda.Universe("topology.parm7", "output_restart.dcd")
-ref = mda.Universe("${WEST_SIM_ROOT}/common_files/${SYSTEM_NAME}.pdb")
+ref = mda.Universe("${PARGAMD_SYSTEM_DIR}/${SYSTEM_NAME}.pdb")
 
 # Select only CA atoms
 mobile_ca = u.select_atoms("name CA")

@@ -12,7 +12,7 @@
 #   - output_restart.dcd  -> trajectory (preferred if present)
 #   - output_restart.rst7 -> single-frame restart (basis state fallback)
 #
-# Topology and reference structure are pulled from $WEST_SIM_ROOT/common_files.
+# Topology and reference structure are pulled from $PARGAMD_SYSTEM_DIR.
 ##############################################################################
 
 # Source env.sh defensively so manual invocations (e.g. pre-flight pcoord
@@ -48,13 +48,13 @@ import MDAnalysis as mda
 import numpy as np
 from MDAnalysis.analysis import rms
 
-sim_root = os.environ["WEST_SIM_ROOT"]
-# Hard error if SYSTEM_NAME is unset rather than silently defaulting to
-# chignolin — a missing SYSTEM_NAME used to mask system swaps and produce
-# misleading "atom count mismatch" failures against the chignolin topology.
-sys_name = os.environ["SYSTEM_NAME"]
-topology = os.path.join(sim_root, "common_files", f"{sys_name}.parm7")
-ref_pdb  = os.path.join(sim_root, "common_files", f"{sys_name}.pdb")
+# Hard error if SYSTEM_NAME or PARGAMD_SYSTEM_DIR are unset rather than
+# silently defaulting — missing env used to mask system swaps and produce
+# misleading "atom count mismatch" failures against the wrong topology.
+sys_name   = os.environ["SYSTEM_NAME"]
+system_dir = os.environ["PARGAMD_SYSTEM_DIR"]
+topology = os.path.join(system_dir, f"{sys_name}.parm7")
+ref_pdb  = os.path.join(system_dir, f"{sys_name}.pdb")
 
 # Prefer the segment trajectory; fall back to the basis-state restart.
 # MDAnalysis cannot infer the AMBER restart format from the .rst7 extension,

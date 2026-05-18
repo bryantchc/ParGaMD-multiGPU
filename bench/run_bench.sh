@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # bench/run_bench.sh — sweep (WORKERS_GPU0, WORKERS_GPU1) distributions and
-# report aggregate GaMD throughput for each. Use this AFTER ./init.sh (or
-# the equivalent) has produced common_files/gamd_restart.checkpoint, before
-# launching a long production run, to pick the worker split that maximizes
-# ns/day for your system on this hardware.
+# report aggregate GaMD throughput for each. Use this AFTER new_run.sh (or
+# equilibrate.sh) has produced $WEST_SIM_ROOT/gamd_restart.checkpoint,
+# before launching a long production run, to pick the worker split that
+# maximizes ns/day for your system on this hardware.
 #
 # Each worker runs gamdRunner directly (no WESTPA, no walker tree) against
 # its own scratch dir seeded with the same checkpoint run_local.sh's iter 1
@@ -26,16 +26,20 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Setup
 # ---------------------------------------------------------------------------
-cd "$(dirname "$(readlink -f "$0")")/.."
+# BASH_SOURCE (not readlink -f) so symlink path resolves to the run dir's
+# bench/ symlink, not the repo's actual bench/. We want the run dir as cwd.
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
 WEST_SIM_ROOT="$PWD"
 export WEST_SIM_ROOT
 # shellcheck disable=SC1091
 source env.sh
 : "${SYSTEM_NAME:?SYSTEM_NAME is unset; check env.sh}"
-[ -f "common_files/${SYSTEM_NAME}.parm7" ] \
-    || { echo "[bench] no common_files/${SYSTEM_NAME}.parm7" >&2; exit 1; }
-[ -f "common_files/gamd_restart.checkpoint" ] \
-    || { echo "[bench] no common_files/gamd_restart.checkpoint — run equilibration first" >&2; exit 1; }
+: "${PARGAMD_RUNTIME_DIR:?PARGAMD_RUNTIME_DIR is unset; check env.sh}"
+: "${PARGAMD_SYSTEM_DIR:?PARGAMD_SYSTEM_DIR is unset; check env.sh}"
+[ -f "$PARGAMD_SYSTEM_DIR/${SYSTEM_NAME}.parm7" ] \
+    || { echo "[bench] no $PARGAMD_SYSTEM_DIR/${SYSTEM_NAME}.parm7" >&2; exit 1; }
+[ -f "gamd_restart.checkpoint" ] \
+    || { echo "[bench] no gamd_restart.checkpoint in $PWD — run ./equilibrate.sh first" >&2; exit 1; }
 
 CONFIGS=${BENCH_CONFIGS:-"4,0 8,0 12,0 16,0 0,4 4,4 6,4 8,4 12,4 12,6 6,6"}
 SEGS_PER_WORKER=${BENCH_SEGS_PER_WORKER:-3}
@@ -98,10 +102,10 @@ fi
 seed_worker_dir() { # $1 dir
     local d="$1"
     mkdir -p "$d"
-    ln -sf "$WEST_SIM_ROOT/common_files/$SYSTEM_NAME.parm7" "$d/topology.parm7"
-    ln -sf "$WEST_SIM_ROOT/common_files/$SYSTEM_NAME.rst7" "$d/coordinates.rst7"
-    ln -sf "$WEST_SIM_ROOT/common_files/gamd-restart.dat"   "$d/gamd-restart.dat"
-    cp    "$WEST_SIM_ROOT/common_files/input.xml"           "$d/input.xml"
+    ln -sf "$PARGAMD_SYSTEM_DIR/$SYSTEM_NAME.parm7" "$d/topology.parm7"
+    ln -sf "$PARGAMD_SYSTEM_DIR/$SYSTEM_NAME.rst7"  "$d/coordinates.rst7"
+    ln -sf "$WEST_SIM_ROOT/gamd-restart.dat"        "$d/gamd-restart.dat"
+    cp    "$WEST_SIM_ROOT/input.xml"                "$d/input.xml"
     # Point gamdRunner's output dir at the scratch dir itself.
     sed -i 's|<directory>.*</directory>|<directory>.</directory>|' "$d/input.xml"
 }
@@ -121,9 +125,9 @@ run_worker() { # $1 dir  $2 mps_pipe ("" if no MPS)
     local t0=$SECONDS
     for ((s=1; s<=SEGS_PER_WORKER; s++)); do
         # Fresh seed each segment → identical work per segment.
-        cp "$WEST_SIM_ROOT/common_files/gamd_restart.checkpoint" \
+        cp "$WEST_SIM_ROOT/gamd_restart.checkpoint" \
            gamd_restart.checkpoint
-        if ! python "$WEST_SIM_ROOT/common_files/gamdRunner" \
+        if ! python "$PARGAMD_RUNTIME_DIR/gamdRunner" \
                 -p CUDA -d 0 -r xml input.xml > "seg${s}.out" 2>&1; then
             echo "FAIL seg=$s dir=$1" >&2
             return 1
