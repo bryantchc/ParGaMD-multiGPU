@@ -1,0 +1,27 @@
+# cv_0.py — mass-weighted best-fit RMSD of CA atoms vs the reference PDB.
+#
+# Each cv_N.py defines a `compute(u, ref)` function called once per frame
+# by westpa_scripts/_pcoord_dispatch.py. The dispatcher loops the
+# Universe across frames, so this function sees `u` positioned at the
+# current frame and just needs to compute & return one float for it.
+#
+#   u    — MDAnalysis Universe of the segment trajectory (or basis-state
+#          structure), positioned at the current frame.
+#   ref  — MDAnalysis Universe of $PARGAMD_SYSTEM_DIR/$SYSTEM_NAME.pdb,
+#          or None if the run dir has no reference PDB.
+#
+# pcoord dim index = the number suffix in the filename. cv_0 → dim 0,
+# cv_1 → dim 1, etc. Sorted lexicographically; use cv_00 / cv_01 padding
+# if you have 10+ CVs.
+from MDAnalysis.analysis import rms
+
+def compute(u, ref):
+    mob_ca = u.select_atoms("name CA")
+    ref_ca = ref.select_atoms("name CA")
+    return rms.rmsd(
+        mob_ca.positions,
+        ref_ca.positions,
+        center=True,
+        superposition=True,
+        weights=mob_ca.masses,
+    )

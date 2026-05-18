@@ -105,6 +105,17 @@ cp "$REPO_DIR/templates/input.xml.template"               "$RUN_DIR/input.xml"
 cp "$REPO_DIR/templates/equilibration_input.xml.template" "$RUN_DIR/equilibration/input.xml"
 cp "$REPO_DIR/templates/bstates.txt.template"             "$RUN_DIR/bstates/bstates.txt"
 
+# Per-system collective-variable scripts. One file per pcoord dimension
+# (sorted lex: cv_0 → dim 0, cv_1 → dim 1, ...). The dispatcher in
+# westpa_scripts/_pcoord_dispatch.py imports these per walker and calls
+# their compute(u, ref) per frame. Edit / add / remove files in the run
+# dir to change the sampled coordinates; remember to update pcoord_ndim
+# AND the boundaries: list count in west.cfg to match.
+for cv in "$REPO_DIR"/templates/cv_*.py.template; do
+    [ -f "$cv" ] || continue
+    cp "$cv" "$RUN_DIR/$(basename "$cv" .template)"
+done
+
 echo "[new_run] scaffold done"
 
 # ---------------------------------------------------------------------------

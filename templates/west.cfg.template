@@ -5,7 +5,11 @@ west:
   system:
     driver: westpa.core.systems.WESTSystem
     system_options:
-      # Dimensionality of your progress coordinate
+      # Dimensionality of your progress coordinate.
+      # MUST equal the number of cv_*.py files in this run dir AND the
+      # number of `boundaries:` lists below. Defaults: cv_0.py = RMSD,
+      # cv_1.py = Rg, so pcoord_ndim = 2. Add/remove cv_N.py files in
+      # the run dir to change what's being sampled.
       pcoord_ndim: 2
       # Number of data points per iteration
       # Needs to be pcoord_len >= 2 (minimum of parent, last frame) to work with most analysis tools

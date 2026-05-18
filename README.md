@@ -71,6 +71,8 @@ pargamd/                          # this repo
 │   ├── west.cfg.template
 │   ├── input.xml.template                  # production GaMD per-segment
 │   ├── equilibration_input.xml.template    # Phase-1 GaMD equilibration
+│   ├── cv_0.py.template                    # CV definitions, one per pcoord dim
+│   ├── cv_1.py.template                    #   default: CA-RMSD + CA Rg
 │   └── bstates.txt.template
 ├── new_run.sh                    # scaffold + first-time equilibrate
 ├── equilibrate.sh                # (re-)equilibrate a scaffolded run dir
@@ -90,6 +92,7 @@ A scaffolded run directory looks like this:
 ├── west.cfg                      # WE bin grid (edit for your system!)
 ├── input.xml                     # production GaMD (edit per system)
 ├── equilibration/input.xml       # equilibration GaMD (edit per system)
+├── cv_0.py, cv_1.py, ...         # collective-variable definitions (edit per system)
 ├── system/<name>.{parm7,rst7,pdb}     # copy from --system-from
 ├── bstates/bstates.txt           # written by equilibrate.sh
 ├── equilibration/out/            # gamd_restart.checkpoint, gamd-restart.dat
@@ -215,7 +218,33 @@ resolution:
 | `<reporting-rate>`      | 500 (= 1 ps)        | pcoord frames per segment |
 | `<random-seed>`         | any int             | `runseg.sh` rotates this on retry |
 
-**Step 6: edit `west.cfg` (WE bin grid)**
+**Step 6a: edit `cv_*.py` (collective variables)**
+
+The default scaffold ships two CVs — `cv_0.py` (mass-weighted CA-RMSD vs
+the reference PDB) and `cv_1.py` (mass-weighted CA Rg). For other systems
+you'll likely want different CVs: distance between active-site residues
+for an enzyme, contact-map metric for a complex, dihedral for a
+conformational switch, etc.
+
+Each `cv_N.py` defines:
+```python
+def compute(u, ref):
+    # u is an MDAnalysis Universe positioned at the current frame.
+    # ref is the reference PDB as a Universe, or None.
+    # Return one float.
+    ...
+```
+
+Add `cv_2.py`, `cv_3.py`, ... for more pcoord dimensions (lex-sorted by
+filename, mapping to pcoord dim 0, 1, ...). Use `cv_00.py` zero-padding
+if you ever need ≥10 CVs.
+
+The dispatcher (`westpa_scripts/_pcoord_dispatch.py`) loads MDAnalysis
+and the Universe once per walker, then calls each module's `compute()`
+per frame — keeps Python startup + import + parse out of the inner loop
+even with many CVs.
+
+**Step 6b: edit `west.cfg` (WE bin grid)**
 
 The default boundaries are `[0, 8 Å]` with 0.2 Å spacing — chignolin-tuned.
 For most other systems you'll need to widen. Use the basis-state pcoord

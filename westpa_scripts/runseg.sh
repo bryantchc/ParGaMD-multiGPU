@@ -168,76 +168,20 @@ EOF
 fi
 
 ##############################################################################
-# 6) Post-processing with MDAnalysis: compute RMSD and Rg
+# 6) Compute pcoord via $WEST_SIM_ROOT/cv_*.py modules
 ##############################################################################
-RMSD_FILE="rmsd_ca.xvg"
-RG_FILE="rg_ca.xvg"
-
-# Create a Python script on-the-fly to run MDAnalysis
-cat << EOF > mdanalysis_rmsd_rg.py
-#!/usr/bin/env python
-
-import MDAnalysis as mda
-from MDAnalysis.analysis import rms
-import numpy as np
-
-# Load the system. topology.parm7 is a per-segment symlink set up at the top
-# of runseg.sh; reference PDB is system-specific via \$SYSTEM_NAME.
-u = mda.Universe("topology.parm7", "output_restart.dcd")
-ref = mda.Universe("${PARGAMD_SYSTEM_DIR}/${SYSTEM_NAME}.pdb")
-
-# Select only CA atoms
-mobile_ca = u.select_atoms("name CA")
-ref_ca    = ref.select_atoms("name CA")
-
-rmsd_list = []
-rg_list   = []
-
-for ts in u.trajectory:
-    # mass-weighted best-fit RMSD
-    # 'weights=mobile_ca.masses' ensures mass weighting
-    # center=True and superposition=True => do best-fit alignment
-    rmsd_value = rms.rmsd(
-        mobile_ca.positions,
-        ref_ca.positions,
-        center=True,
-        superposition=True,
-        weights=mobile_ca.masses
-    )
-    # Radius of gyration (all CA positions)
-    rg_value = mobile_ca.radius_of_gyration()
-    rmsd_list.append(rmsd_value)
-    rg_list.append(rg_value)
-
-# Write out data in a format similar to cpptraj .xvg
-with open("${RMSD_FILE}", "w") as f:
-    f.write("# frame RMSD_CA(Angstrom)\n")
-    for i, val in enumerate(rmsd_list):
-        f.write(f"{i} {val}\n")
-
-with open("${RG_FILE}", "w") as f:
-    f.write("# frame Rg_CA(Angstrom)\n")
-    for i, val in enumerate(rg_list):
-        f.write(f"{i} {val}\n")
-EOF
-
-# Run the Python script
-python mdanalysis_rmsd_rg.py
-if [ $? -ne 0 ]; then
-    echo "Error: MDAnalysis RMSD/Rg calculation failed."
-    exit 1
-fi
-
-##############################################################################
-# 7) Write final RMSD and Rg data to $WEST_PCOORD_RETURN
-##############################################################################
-if [ -f "$RMSD_FILE" ] && [ -f "$RG_FILE" ]; then
+# The shared-Universe dispatcher loads MDAnalysis once and runs every
+# user-defined CV (cv_0.py, cv_1.py, ...) per frame. Edit those files in
+# the run dir to change what's being sampled; pcoord_ndim in west.cfg
+# must match the number of cv_*.py files.
+REF_PDB="$PARGAMD_SYSTEM_DIR/${SYSTEM_NAME}.pdb"
+[ -f "$REF_PDB" ] || REF_PDB="-"
+python "$WEST_SIM_ROOT/westpa_scripts/_pcoord_dispatch.py" \
+    topology.parm7 output_restart.dcd "$REF_PDB" "$WEST_SIM_ROOT" \
     > "$WEST_PCOORD_RETURN"
-    # Extract second column from lines >1 of each file, then paste them
-    paste <(awk 'NR>1 {print $2}' "$RMSD_FILE") \
-          <(awk 'NR>1 {print $2}' "$RG_FILE") >> "$WEST_PCOORD_RETURN"
-else
-    echo "Error: Missing $RMSD_FILE or $RG_FILE"
+
+if [ ! -s "$WEST_PCOORD_RETURN" ]; then
+    echo "Error: pcoord computation produced empty output." >&2
     exit 1
 fi
 
