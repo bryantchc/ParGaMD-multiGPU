@@ -130,6 +130,48 @@ So a worker connecting to GPU 1's daemon must set `CUDA_VISIBLE_DEVICES=0`
 `gamdRunner -d 1` gives `openmm.OpenMMException: Illegal value for
 DeviceIndex: 1`. Both errors hit us before we sorted out the layering.
 
+## Motherboard sensors on Gigabyte TRX50
+
+The TRX50 AERO D ships with two ITE IT8695 Super I/O chips. Neither is
+recognized by `sensors-detect 3.6.0` by ID, but the in-tree `it87`
+kernel driver works with explicit `force_id`. To enable persistently:
+
+```bash
+# Module options at load time
+sudo tee /etc/modprobe.d/it87.conf <<'EOF'
+options it87 force_id=0x8695 ignore_resource_conflict=1
+EOF
+
+# Auto-load on every boot
+echo "it87" | sudo tee /etc/modules-load.d/it87.conf
+
+# Verify (no reboot needed)
+sudo modprobe -r it87
+sudo modprobe it87
+sensors -A
+```
+
+You should see two `it87952-isa-0a40` and `it87952-isa-0a60` chip
+groups with fan RPMs (`fan1..fan3`), motherboard temps (`temp1..temp3`),
+and voltage channels (`in0..in6`, `3VSB`, `Vbat`).
+
+**Reality check on what's reported:**
+- **Fan RPMs and temps are accurate** — useful for catching case-fan
+  failure or VRM heating early.
+- **Voltage labels are NOT trustworthy in absolute terms**. Gigabyte
+  uses board-level voltage dividers that the open driver doesn't know
+  about, so a `+3.3V` channel may read e.g. 2.07 V — the chip ADC is
+  reading correctly, the multiplier is wrong. There's no calibrated
+  +12 V channel exposed at all.
+- **Voltage trends still work**: a 10% drop in any in0..in6 channel
+  under load is meaningful even if you don't know what rail it is.
+
+`run_local.sh` writes timestamped `sensors -A` dumps to `board_health.log`
+every 10 s alongside `gpu_util.log` whenever `sensors` is on PATH.
+For full PSU-side monitoring you'd want a calibrated rail probe
+(motherboard pinheader + ATX extension with sense lines) or a smart
+plug at the wall — see the README "Health monitoring" section.
+
 ## Recommended production config
 
 ```bash

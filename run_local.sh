@@ -203,6 +203,7 @@ source env.sh
 WORKER_PIDS=()
 MASTER_PID=""
 LOG_PID=""
+BOARD_LOG_PID=""
 
 cleanup() {
     echo "[run_local] cleanup..."
@@ -225,6 +226,7 @@ cleanup() {
         kill -TERM "$wpid" 2>/dev/null || true
     done
     [ -n "$LOG_PID" ] && kill "$LOG_PID" 2>/dev/null || true
+    [ -n "${BOARD_LOG_PID:-}" ] && kill "$BOARD_LOG_PID" 2>/dev/null || true
 
     # Reap orphaned per-segment children. When a worker dies hard, its
     # runseg.sh + python gamdRunner descendants get reparented to init
@@ -263,6 +265,22 @@ trap cleanup EXIT INT TERM
 nvidia-smi --query-gpu=timestamp,index,name,utilization.gpu,memory.used,temperature.gpu,power.draw,clocks_event_reasons.hw_power_brake_slowdown,clocks_event_reasons.hw_thermal_slowdown \
            --format=csv -l 10 > gpu_util.log &
 LOG_PID=$!
+
+# Motherboard telemetry — same 10 s cadence. Captures whatever sensors
+# the running it87/k10temp/nvme drivers expose: fan RPMs, board temps,
+# CPU temp, NVMe temp, and (vendor-specific scaling permitting) some
+# voltage rails. Absolute voltage scaling on Gigabyte boards is often
+# wrong; trends-over-time are still useful for catching fan failures
+# and VRM heating under load. Silently no-op if `sensors` isn't on PATH.
+if command -v sensors >/dev/null; then
+    (
+        while sleep 10; do
+            printf -- "--- %s ---\n" "$(date -Iseconds)"
+            sensors -A 2>/dev/null
+        done
+    ) > board_health.log &
+    BOARD_LOG_PID=$!
+fi
 
 echo "[run_local] starting ZMQ master..."
 w_run --work-manager=zmq \

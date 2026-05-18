@@ -485,14 +485,33 @@ The watcher has zero polling overhead — it just tails the existing
 `gpu_util.log`. `WATCH_TEMP_C=85 ./monitor_psu.sh` to raise the
 "too hot" threshold (default 83 °C, well below the GPU's hardware trip).
 
+### Motherboard telemetry (`board_health.log`)
+
+If `lm_sensors` is installed and the right Super I/O / hwmon drivers
+are loaded, `run_local.sh` also writes a `board_health.log` next to
+`gpu_util.log` with timestamped `sensors -A` dumps every 10 s. Captures
+fan RPMs, motherboard zone temps, CPU temp, NVMe temp, and (depending
+on the driver) some voltage rails.
+
+On Gigabyte boards the absolute voltage scaling reported by the open
+`it87` driver is often wrong (vendor uses undeclared dividers), so
+treat in0..in6 as **uncalibrated trend signals**: a 10% droop under
+load is still meaningful even if the absolute value isn't. Fan RPMs
+and temps are accurate.
+
+For the TRX50 AERO D specifically, load `it87` with `force_id=0x8695`.
+See [BLACKWELL_NOTES.md](BLACKWELL_NOTES.md#motherboard-sensors-on-gigabyte-trx50)
+for the persistence recipe.
+
 ### Post-mortem use
 
 After a crash, even if the journal stops cold:
 ```bash
 tail -5 gpu_util.log                            # what were temp / power right before?
 grep Active gpu_util.log                        # any brake/thermal events at all?
+grep -A4 'fan\|temp' board_health.log | tail -30  # board temps / fan state near crash
 ```
-A clean run has no "Active" entries anywhere in the file.
+A clean run has no "Active" entries anywhere in gpu_util.log.
 
 ## Hardware notes
 

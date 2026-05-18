@@ -5,6 +5,7 @@ traj_segs/
 seg_logs/
 istates/
 strip.log
+board_health.log
 
 # Logs
 *.log
