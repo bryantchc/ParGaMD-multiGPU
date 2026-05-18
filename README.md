@@ -47,8 +47,16 @@ $EDITOR west.cfg
 # 7. (Optional) Pick the best worker split for your hardware (~20 min)
 ./bench/run_bench.sh
 
-# 8. Production
+# 8. (Optional, but recommended for solvated systems > ~50 k atoms)
+# Enable background trajectory stripping to keep disk in check
+sed -i 's|STRIP_AFTER_ITERS:-0|STRIP_AFTER_ITERS:-1|' env.sh
+
+# 9. Production
 USE_MPS=1 CUDA_VISIBLE_DEVICES=0,1 WORKERS_GPU0=12 WORKERS_GPU1=4 ./run_local.sh
+
+# 10. When the run is truly done, mop up the final held-back iterations
+# (skip if you didn't enable stripping in step 8)
+./westpa_scripts/strip_iter.sh --finalize
 ```
 
 Each `~/runs/<name>-*/` is a fully self-contained simulation directory.
@@ -101,7 +109,8 @@ A scaffolded run directory looks like this:
 ├── westpa_scripts → /path/to/repo/westpa_scripts
 ├── bench → /path/to/repo/bench
 ├── run_local.sh, equilibrate.sh, init.sh             # script symlinks
-└── [west.h5, traj_segs/, seg_logs/, gpu_util.log]    # generated at runtime
+├── [west.h5, traj_segs/, seg_logs/, gpu_util.log]    # generated at runtime
+└── [strip.log, system/<name>.stripped.parm7]         # if STRIP_AFTER_ITERS=1
 ```
 
 ---
@@ -284,7 +293,25 @@ it may differ.
 See [BLACKWELL_NOTES.md](BLACKWELL_NOTES.md) for the methodology behind
 the two throughput metrics and why MPS=1 is the default.
 
-**Step 8: production**
+**Step 8: (optional) enable trajectory stripping**
+
+For systems > ~50 k atoms (Cas9 / Cas12a / LanM / membrane proteins),
+solvent dominates trajectory bytes — turn on background stripping now to
+keep disk usage in check during the run. Edit `env.sh` (or sed):
+
+```bash
+sed -i 's|STRIP_AFTER_ITERS:-0|STRIP_AFTER_ITERS:-1|' env.sh
+```
+
+You can also change `STRIP_MASK` in `env.sh` if your system has unusual
+solvent or counterion residue names; the default `:WAT,Na+,Cl-,K+`
+covers standard TIP3P + monovalents and preserves catalytic divalents
+(Mg²⁺, Zn²⁺, Ca²⁺). Skip this step for chignolin-scale systems where
+disk isn't tight — there's no behavioral downside, but the cpptraj
+overhead is wasted on tiny systems. See [Disk management](#disk-management-trajectory-stripping-opt-in)
+below for the full mechanism.
+
+**Step 9: production**
 
 ```bash
 USE_MPS=1 CUDA_VISIBLE_DEVICES=0,1 WORKERS_GPU0=12 WORKERS_GPU1=4 ./run_local.sh
@@ -298,11 +325,33 @@ USE_MPS=1 CUDA_VISIBLE_DEVICES=0,1 WORKERS_GPU0=12 WORKERS_GPU1=4 ./run_local.sh
 - Stream GPU utilization to `gpu_util.log`
 - Catch Ctrl-C and drain WESTPA cleanly so iterations end on a boundary
 
+**Step 10: when the run is truly done, mop up the held-back iters**
+
+Only relevant if you enabled stripping in step 8. During the live run,
+stripping always lags by 2 iters so the freeze-fallback path in
+`runseg.sh` stays safe. When you're sure you won't run more iterations,
+strip the held-back tail:
+
+```bash
+./westpa_scripts/strip_iter.sh --finalize     # idempotent; safe to re-run
+```
+
+Watch progress / errors in `strip.log`. The full mechanism (lock files,
+atomic mv, restart safety) is described in
+[Disk management](#disk-management-trajectory-stripping-opt-in) below.
+
 ### Restarting a stopped or crashed run
 
 Just re-invoke `run_local.sh`. If `west.h5` exists it resumes from the
 last completed iteration. Walker logs are appended (the old `west_master.log`
 is overwritten — copy it aside if you need it).
+
+If stripping was on, the N-2 lag means iters N-1 and N stayed full-atom
+during the original run — so the freeze-fallback in iter N+1 still has
+the parent DCD it needs to copy forward. Already-stripped iters
+(.stripped markers) are skipped on subsequent strip invocations. **Do
+NOT run `--finalize` if you intend to resume** — that strips the
+held-back iters that the next iteration's freeze-fallback might need.
 
 ### Switching to a different system
 
