@@ -457,6 +457,43 @@ appears in two places:
 data — just load `<name>.stripped.parm7` instead of `<name>.parm7`. CV
 definitions that select on `name CA` or residue identity don't change.
 
+## Health monitoring (PSU + thermals)
+
+`run_local.sh` polls GPU telemetry every 10 s into `gpu_util.log` with
+nine columns including `temperature.gpu`, `power.draw`, and
+`clocks_event_reasons.hw_power_brake_slowdown` /
+`hw_thermal_slowdown`.
+
+The **`hw_power_brake_slowdown` flag is the single best PSU-trouble
+signal**: it fires when the external power source asserts the brake
+line back to the GPU — i.e. the PSU told the GPU "back off" because it
+couldn't deliver requested power. Healthy operation = "Not Active"
+throughout the entire run. Even one "Active" event in a long run means
+your PSU got caught struggling.
+
+### Live watcher
+
+Run this alongside production to surface brake / thermal / over-temp
+events in real time:
+
+```bash
+./westpa_scripts/monitor_psu.sh                 # tail forever, alert to stdout + psu_alerts.log
+./westpa_scripts/monitor_psu.sh --halt-on-brake # also SIGINT run_local.sh on first brake
+```
+
+The watcher has zero polling overhead — it just tails the existing
+`gpu_util.log`. `WATCH_TEMP_C=85 ./monitor_psu.sh` to raise the
+"too hot" threshold (default 83 °C, well below the GPU's hardware trip).
+
+### Post-mortem use
+
+After a crash, even if the journal stops cold:
+```bash
+tail -5 gpu_util.log                            # what were temp / power right before?
+grep Active gpu_util.log                        # any brake/thermal events at all?
+```
+A clean run has no "Active" entries anywhere in the file.
+
 ## Hardware notes
 
 This fork is developed on a TRX50 + RTX 5090 + RTX 5070 workstation

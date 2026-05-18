@@ -252,7 +252,15 @@ trap cleanup EXIT INT TERM
 # ---------------------------------------------------------------------------
 # Launch ZMQ master in background
 # ---------------------------------------------------------------------------
-nvidia-smi --query-gpu=timestamp,index,name,utilization.gpu,memory.used \
+# GPU telemetry — sampled every 10 s. Columns:
+#   timestamp, index, name, util, mem.used, temp, power.draw,
+#   hw_power_brake_slowdown, hw_thermal_slowdown
+# hw_power_brake_slowdown is THE PSU-trouble signal — fires when the
+# external power source asserts the brake line back to the GPU. If you
+# see it flip to "Active", your PSU couldn't deliver requested power.
+# See westpa_scripts/monitor_psu.sh for a live tailer that surfaces
+# brake events; see BLACKWELL_NOTES.md / README for the full rationale.
+nvidia-smi --query-gpu=timestamp,index,name,utilization.gpu,memory.used,temperature.gpu,power.draw,clocks_event_reasons.hw_power_brake_slowdown,clocks_event_reasons.hw_thermal_slowdown \
            --format=csv -l 10 > gpu_util.log &
 LOG_PID=$!
 
