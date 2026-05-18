@@ -367,6 +367,47 @@ generic reweighters:
 
 ---
 
+## Disk management: trajectory stripping (opt-in)
+
+For large systems (~200k+ atoms with explicit solvent), raw trajectories
+fill disk fast — a 250-iter Cas9-class run with ~16 walkers/iter is
+~100 GB raw, of which ~90% is water. `westpa_scripts/strip_iter.sh`
+strips solvent via cpptraj for ~10–60× disk reduction; opt in by setting
+`STRIP_AFTER_ITERS=1` in `env.sh`.
+
+**How it works during a live run.** When stripping is on, the WESTPA
+`post_iteration` hook fires `strip_iter.sh --iter N-2` in the background
+after every iter completes. The 2-iter lag is deliberate: the
+freeze-fallback in `runseg.sh` reads iter N-1's full-atom DCD when iter N
+has all retries fail, so iters N-1 and N must stay full-atom to keep
+that path safe across crashes and resumes. Stripping never blocks the
+WESTPA master — it's fire-and-forget into `strip.log`.
+
+**When you're done with a run** (no more iters planned, ready for
+analysis), strip the held-back final iters too:
+
+```bash
+cd ~/runs/<name>-prod
+./westpa_scripts/strip_iter.sh --finalize     # strips every not-yet-stripped iter
+```
+
+**Configuration** (in `env.sh`):
+- `STRIP_AFTER_ITERS=1` — turn on background stripping (default `0`)
+- `STRIP_MASK=":WAT,Na+,Cl-,K+"` — cpptraj atom-mask to REMOVE. Default
+  strips water + standard counterions. Catalytic divalents (Mg²⁺, Zn²⁺,
+  Ca²⁺) are preserved — important for Cas systems with Mg²⁺-dependent
+  cleavage chemistry.
+
+**Outputs.** Stripped DCDs replace the originals (with a `.stripped`
+marker file alongside, so re-runs are idempotent). A stripped topology
+appears in two places:
+- `system/<name>.stripped.parm7` (canonical, next to the full topology)
+- `traj_segs/<name>.stripped.parm7` (convenience copy for analysis scripts)
+
+`cv_*.py` and analysis code work transparently against the stripped
+data — just load `<name>.stripped.parm7` instead of `<name>.parm7`. CV
+definitions that select on `name CA` or residue identity don't change.
+
 ## Hardware notes
 
 This fork is developed on a TRX50 + RTX 5090 + RTX 5070 workstation

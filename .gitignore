@@ -4,6 +4,7 @@ west.log
 traj_segs/
 seg_logs/
 istates/
+strip.log
 
 # Logs
 *.log
