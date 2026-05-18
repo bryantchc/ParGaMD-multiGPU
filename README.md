@@ -1,336 +1,376 @@
-# Parallelizable Gaussian Accelerated Molecular Dynamics (ParGaMD)
+# ParGaMD — Parallelizable Gaussian Accelerated Molecular Dynamics
 
-> **Local-workstation fork**: this fork has been adapted to run on a
-> single Linux box with NVIDIA GPUs (no SLURM, no module loads). For
-> the local-execution story — launcher, MPS configuration, NaN
-> robustness, system swapping, troubleshooting — see
-> **[WORKSTATION.md](WORKSTATION.md)**. The original cluster
-> launchers are preserved in `_tacc_original/` for reference. The
-> theory and reweighting documentation below is unchanged from
-> upstream.
+A hybrid enhanced-sampling method combining **GaMD** (Gaussian Accelerated
+Molecular Dynamics — adds a harmonic boost potential to flatten energy
+barriers) with **WESTPA** (Weighted Ensemble — many walkers exploring in
+parallel along user-defined collective variables). Runs on a single Linux
+workstation with one or more NVIDIA GPUs, no SLURM required. Recovers
+unbiased free energies via established reweighting protocols.
 
-A hybrid enhanced sampling method integrating Gaussian Accelerated Molecular Dynamics (GaMD) with the Weighted Ensemble (WE) framework for efficient multi-GPU parallelization.
-
-## Overview
-
-ParGaMD leverages the accelerated sampling capabilities of GaMD and combines them with the multi-GPU parallelization framework of the Weighted Ensemble method. This integration enables:
-
-- **Super-Linear GPU scaling** for molecular dynamics simulations
-- **Guided exploration** along user-defined collective variables (CVs)
-- **Enhanced barrier crossing** through GaMD's harmonic boost potential
-- **Rigorous free energy recovery** via established reweighting protocols
-
-For theoretical details, please refer to:
-> Siddharth Sonti, Anugraha Thyagatur , Hung-Yu Wan, et al. Accelerating free energy exploration using parallelizable Gaussian accelerated molecular dynamics (ParGaMD). ChemRxiv. 28 May 2025.
-DOI: https://doi.org/10.26434/chemrxiv-2025-rr5v9
+Reference: Sonti, Thyagatur, Wan, et al., *Accelerating free energy
+exploration using parallelizable Gaussian accelerated molecular dynamics
+(ParGaMD)*, ChemRxiv (2025).
+DOI: [10.26434/chemrxiv-2025-rr5v9](https://doi.org/10.26434/chemrxiv-2025-rr5v9).
 
 ---
 
-## Table of Contents
+## Quick start
 
-1. [Installation](#installation)
-2. [Running ParGaMD with OpenMM](#running-pargamd-with-openmm)
-3. [Reweighting Methods](#reweighting-methods)
-4. [Usage Examples](#usage-examples)
-5. [Output Files](#output-files)
-6. [Citation](#citation)
+You have a system as `<name>.{parm7,rst7,pdb}` and want to run ParGaMD on it.
+
+```bash
+# 0. One-time: install dependencies (see Installation below)
+
+# 1. Park the system files
+mkdir -p ~/pargamd_systems/<name>
+cp /path/to/<name>.{parm7,rst7,pdb} ~/pargamd_systems/<name>/
+
+# 2. Scaffold a fresh run directory (instant)
+./new_run.sh ~/runs/<name>-prod \
+    --system <name> \
+    --system-from ~/pargamd_systems/<name> \
+    --skip-equil
+
+# 3. Edit equilibration GaMD params for your system (temperature, dt, sigma0,
+# total step counts, etc.)
+$EDITOR ~/runs/<name>-prod/equilibration/input.xml
+
+# 4. Equilibrate (~60 min on a 5090; also computes basis-state pcoord)
+cd ~/runs/<name>-prod && ./equilibrate.sh
+
+# 5. Edit per-segment production params (dt, extension-steps, etc.)
+$EDITOR input.xml
+
+# 6. Edit WE bin grid for your system's pcoord range
+$EDITOR west.cfg
+
+# 7. (Optional) Pick the best worker split for your hardware (~20 min)
+./bench/run_bench.sh
+
+# 8. Production
+USE_MPS=1 CUDA_VISIBLE_DEVICES=0,1 WORKERS_GPU0=12 WORKERS_GPU1=4 ./run_local.sh
+```
+
+Each `~/runs/<name>-*/` is a fully self-contained simulation directory.
+Multiple runs in parallel just need different directories.
+
+---
+
+## Repository layout
+
+The repo is **code only**. Simulation runs live elsewhere (in
+`~/runs/<name>/`) and are scaffolded by `new_run.sh`.
+
+```
+pargamd/                          # this repo
+├── runtime/                      # the gamd-openmm package + gamdRunner scripts
+├── westpa_scripts/               # runseg.sh, get_pcoord.sh — invoked by WESTPA
+├── bench/run_bench.sh            # worker-distribution throughput sweep
+├── templates/                    # per-system templates copied into each run dir
+│   ├── env.sh.template
+│   ├── west.cfg.template
+│   ├── input.xml.template                  # production GaMD per-segment
+│   ├── equilibration_input.xml.template    # Phase-1 GaMD equilibration
+│   └── bstates.txt.template
+├── new_run.sh                    # scaffold + first-time equilibrate
+├── equilibrate.sh                # (re-)equilibrate a scaffolded run dir
+├── run_local.sh                  # ZMQ launcher (master + N pinned workers)
+├── init.sh                       # WESTPA w_init wrapper (idempotent)
+├── analyze/                      # post-run analysis (PMF reweighting)
+├── reweigh/                      # upstream reweighting tools (1D, 2D, CE)
+├── README.md                     # this file
+└── BLACKWELL_NOTES.md            # hardware quirks + multi-GPU tuning rationale
+```
+
+A scaffolded run directory looks like this:
+
+```
+~/runs/<name>-prod/
+├── env.sh                        # SYSTEM_NAME, paths, ZMQ tuning (editable)
+├── west.cfg                      # WE bin grid (edit for your system!)
+├── input.xml                     # production GaMD (edit per system)
+├── equilibration/input.xml       # equilibration GaMD (edit per system)
+├── system/<name>.{parm7,rst7,pdb}     # copy from --system-from
+├── bstates/bstates.txt           # written by equilibrate.sh
+├── equilibration/out/            # gamd_restart.checkpoint, gamd-restart.dat
+├── gamd_restart.checkpoint → equilibration/out/...   # symlink, auto-wired
+├── runtime → /path/to/repo/runtime                   # code symlinks
+├── westpa_scripts → /path/to/repo/westpa_scripts
+├── bench → /path/to/repo/bench
+├── run_local.sh, equilibrate.sh, init.sh             # script symlinks
+└── [west.h5, traj_segs/, seg_logs/, gpu_util.log]    # generated at runtime
+```
 
 ---
 
 ## Installation
 
 ### Prerequisites
+- Python ≥ 3.9, Anaconda / Miniconda
+- NVIDIA GPU with CUDA driver (see [BLACKWELL_NOTES.md](BLACKWELL_NOTES.md)
+  for consumer-Blackwell-specific notes)
 
-- Python ≥ 3.8
-- [Anaconda](https://www.anaconda.com/download) or Miniconda
-- CUDA-compatible GPU(s)
-
-### Step 1: Clone this Repository
-
+### Conda env
 ```bash
-git clone https://github.com/anugrahat/ParGaMD_MPS_TACC.git
-cd ParGaMD_MPS_TACC
-```
-
-> **Important:** Use this repository rather than the standard `gamd-openmm` package, as modifications have been made to ensure compatibility with the WESTPA framework for ParGaMD simulations.
-
-### Step 2: Install Dependencies
-
-```bash
-conda create -n pargamd python=3.9
+conda create -n pargamd python=3.11
 conda activate pargamd
-conda install -c conda-forge openmm mdtraj ambertools
-pip install westpa numpy matplotlib
+conda install -c conda-forge openmm mdanalysis mdtraj ambertools
+pip install westpa numpy matplotlib h5py
+```
+
+### Repo
+```bash
+git clone <this-repo-url> ~/code/pargamd
+cd ~/code/pargamd
 ```
 
 ---
 
-## Running ParGaMD with OpenMM
+## Detailed usage
 
-ParGaMD simulations follow a two-phase protocol: (1) Conventional GaMD equilibration run and (2) ParGaMD production with WESTPA.
+### Setting up a new system
 
-### Phase 1: GaMD Parameter Equilibration
+You have a topology `villin.parm7`, restart `villin.rst7`, and reference
+PDB `villin.pdb`. All three filenames must share the basename you'll pass
+as `--system`.
 
-Before initiating ParGaMD, run a short GaMD simulation (default: 4 ns) to obtain the finalized boost potential parameters (*E*, *V*<sub>max</sub>, *V*<sub>min</sub>, *k*).
+**Step 1: place the system files**
 
-```bash
-gamdRunner xml input.xml or sbatch common_files/gamd_prerun.sh
-```
+Two options:
+- **Library style** (recommended if you'll have multiple systems):
+  `~/pargamd_systems/villin/villin.{parm7,rst7,pdb}` — then
+  `--system-from ~/pargamd_systems/villin` later.
+- **Ad hoc**: any directory, then `--system-from /that/dir`.
 
-The equilibration protocol comprises:
-1. Conventional MD preparatory stage
-2. Conventional MD stage
-3. GaMD pre-equilibration stage
-4. GaMD equilibration stage
+`new_run.sh` *copies* (not symlinks) these into `<run_dir>/system/`, so
+the run is self-contained.
 
-Upon completion, the GaMD parameters are written to output files and serve as input for the ParGaMD production phase.
-
-### Phase 2: ParGaMD Production with WESTPA
-
-#### Configuration
-
-1. **Define collective variables (CVs):** Specify the reaction coordinates for bin partitioning.
-
-2. **Set WE parameters:**
-   - Resampling time τ (recommended: 100 ps – 1 ns depending on system size)
-   - Target walkers per bin *n*<sub>w</sub> (typical: 4–6)
-   - Bin boundaries along each CV dimension
-
-3. **Prepare WESTPA configuration files** (`west.cfg`, `env.sh`, propagator scripts).
-
-#### Running with NVIDIA Multi-Process Service (MPS)
-
-For optimal GPU utilization, enable MPS to run multiple WESTPA segments per GPU:
+**Step 2: scaffold the run directory**
 
 ```bash
-# Start MPS daemon (execute once per job) if using MPS (you might need to check if MPS enabled in your cluster or org)
-nvidia-cuda-mps-control -d
-
-run run_WE.sh
+./new_run.sh ~/runs/villin-test01 \
+    --system villin \
+    --system-from ~/pargamd_systems/villin \
+    --skip-equil
 ```
 
-MPS enables concurrent kernel execution from multiple OpenMM instances on a single GPU, yielding approximately **4-fold throughput improvement** compared to single-segment-per-GPU execution.
+`--skip-equil` lets you edit equilibration parameters before running it.
+Drop the flag if defaults are fine; equilibration will run automatically
+at the end of `new_run.sh`.
 
-#### Key Modifications in This Repository
+Available `new_run.sh` flags:
+| flag | purpose |
+|---|---|
+| `--system <name>`        | required — sets SYSTEM_NAME in env.sh |
+| `--system-from <path>`   | source dir for the three system files; default `../pargamd_systems/<name>` |
+| `--skip-equil`           | scaffold only; you run `./equilibrate.sh` later |
+| `--seed-from <dir>`      | import an existing equilibration's outputs (skip the 60 min) |
 
-Two critical modifications ensure ParGaMD compatibility with WESTPA:
+**Step 3: edit `equilibration/input.xml`**
 
-1. **Stochastic Independence:** Each WE iteration creates a new GaMD integrator and simulation context with a unique random seed, ensuring walkers evolve stochastically.
+Per-system tunables in equilibration:
 
-2. **Segment Duration Control:** The `<extension-steps>` XML attribute specifies the exact number of MD steps per WE segment, enabling precise resampling time τ.
+| element | default (chignolin) | tune when |
+|---|---|---|
+| `<temperature>`               | 300 K          | match your target ensemble |
+| `<dt>`                        | 0.002 ps       | shorter for stiff systems / no SHAKE |
+| `<sigma0p>`, `<sigma0d>`      | 6.0 kcal/mol   | smaller for stiffer systems (= less aggressive boost) |
+| `<number-of-steps>` block     | 200k/800k/200k/800k (cMD-prep / cMD / GaMD-prep / GaMD) | scale up for larger systems |
+| `<friction>`                  | 1.0 ps⁻¹       | rarely changed |
+| `<barostat>` element          | NPT or NVT     | match your equilibration ensemble |
+
+You don't need to touch path elements (`topology.parm7`,
+`coordinates.rst7`) — `equilibrate.sh` symlinks those against
+`$SYSTEM_NAME` at runtime.
+
+**Step 4: equilibrate**
+
+```bash
+cd ~/runs/villin-test01
+./equilibrate.sh                  # ~60 min on a 5090; also writes bstates.txt
+```
+
+On success: `equilibration/out/gamd_restart.checkpoint` is produced and
+symlinked into the run dir, and `bstates/bstates.txt` is populated with
+the basis-state pcoord. The script is **idempotent**: re-running it with
+an existing seed just refreshes `bstates.txt` (cheap). Pass `--force` to
+actually re-equilibrate.
+
+If equilibration fails (NaN, instability), check
+`equilibration/equilibration.log`, tune `equilibration/input.xml`
+(typically smaller `dt`, smaller `sigma0`, longer cMD-prep), and re-run
+with `./equilibrate.sh --force`.
+
+**Step 5: edit `input.xml` (production)**
+
+Per-segment GaMD parameters that affect throughput and per-segment time
+resolution:
+
+| element | default | notes |
+|---|---|---|
+| `<temperature>`         | 300 K               | match equilibration |
+| `<dt>`                  | 0.002 ps            | match equilibration |
+| `<sigma0p>`, `<sigma0d>`| 6.0 kcal/mol        | match equilibration |
+| `<extension-steps>`     | 50000 (= 100 ps)    | per-WE-segment length |
+| `<reporting-rate>`      | 500 (= 1 ps)        | pcoord frames per segment |
+| `<random-seed>`         | any int             | `runseg.sh` rotates this on retry |
+
+**Step 6: edit `west.cfg` (WE bin grid)**
+
+The default boundaries are `[0, 8 Å]` with 0.2 Å spacing — chignolin-tuned.
+For most other systems you'll need to widen. Use the basis-state pcoord
+in `bstates/bstates.txt` (printed by `equilibrate.sh`) as a starting
+point for the bin range you want to cover.
+
+Edit the two `boundaries:` lists (one per pcoord dim):
+
+```yaml
+boundaries:
+  - ['-inf', 0.0, 0.5, 1.0, ..., 25.0, 'inf']    # pcoord dim 0 (RMSD)
+  - ['-inf', 5.0, 5.5, 6.0, ..., 15.0, 'inf']    # pcoord dim 1 (Rg)
+```
+
+Rules of thumb:
+- Cover the range you expect the system to explore (folded ↔ unfolded etc.)
+- Bin spacing ≈ thermal RMSD fluctuation (~0.2–1 Å)
+- Total bins < ~5000 for tractable WESTPA bookkeeping
+- `bin_target_counts: 4` is fine for most systems
+
+`max_total_iterations` and `max_run_wallclock` are also in `west.cfg`;
+edit to taste.
+
+**Step 7: (optional) benchmark worker distribution**
+
+```bash
+./bench/run_bench.sh                  # full 11-config sweep, ~20 min
+# Or quick check:
+BENCH_CONFIGS="8,0 12,0 12,4" BENCH_SEGS_PER_WORKER=2 ./bench/run_bench.sh
+```
+
+Output is a markdown table; pick the config with the highest **fed_ns_day**
+whose `g0_s` and `g1_s` are within ~20% of each other (well-balanced).
+For chignolin on our 5090+5070 box this was `12,4`. For other systems
+it may differ.
+
+See [BLACKWELL_NOTES.md](BLACKWELL_NOTES.md) for the methodology behind
+the two throughput metrics and why MPS=1 is the default.
+
+**Step 8: production**
+
+```bash
+USE_MPS=1 CUDA_VISIBLE_DEVICES=0,1 WORKERS_GPU0=12 WORKERS_GPU1=4 ./run_local.sh
+```
+
+`run_local.sh` will:
+- Start one user-mode MPS daemon per visible GPU (auto cleaned up on exit)
+- Launch a ZMQ master + N pinned workers (one per (gpu, slot) pair)
+- Call `./init.sh` to create `west.h5` from `bstates/bstates.txt` if
+  none exists
+- Stream GPU utilization to `gpu_util.log`
+- Catch Ctrl-C and drain WESTPA cleanly so iterations end on a boundary
+
+### Restarting a stopped or crashed run
+
+Just re-invoke `run_local.sh`. If `west.h5` exists it resumes from the
+last completed iteration. Walker logs are appended (the old `west_master.log`
+is overwritten — copy it aside if you need it).
+
+### Switching to a different system
+
+Don't edit an existing run dir — make a new one:
+
+```bash
+./new_run.sh ~/runs/<other_system>-prod --system <other_system> ...
+```
+
+Each system gets its own clean run dir.
 
 ---
 
-## Reweighting Methods
+## Reweighting (recovering unbiased free energies)
 
-ParGaMD applies a harmonic boost potential Δ*V*(**r**) when the system potential *V*(**r**) falls below a threshold *E*:
+GaMD adds a harmonic boost ΔV(**r**) = ½ k (E − V(**r**))² when V(**r**)
+falls below E. Recovery of the unbiased free-energy surface requires
+reweighting that accounts for both the GaMD boost and the WE walker weights.
 
-$$\Delta V(\mathbf{r}) = \frac{k}{2}(E - V(\mathbf{r}))^2$$
+Two methods, picked by the shape of the ΔV distribution in each bin:
 
-Recovery of the unbiased free energy landscape requires reweighting to account for both the GaMD boost potential and WE trajectory weights.
+| ΔV distribution                       | Method | Script |
+|---------------------------------------|--------|--------|
+| Broad / non-Gaussian (e.g. chignolin, PPARα) | Maclaurin series | [`reweigh/reweigh.py`](reweigh/reweigh.py) |
+| Near-Gaussian (e.g. α-synuclein-PAL)  | Cumulant expansion | [`reweigh/reweigh_CE.py`](reweigh/reweigh_CE.py) |
 
-### Method 1: Maclaurin Series Expansion (`reweigh.py`)
+### Maclaurin (recommended default)
 
-The Maclaurin series method approximates the exponential Boltzmann factor directly:
+Approximates the Boltzmann factor directly:
 
-$$e^{\beta \Delta V} \approx \sum_{k=0}^{n} \frac{(\beta \Delta V)^k}{k!}$$
+$$\langle e^{\beta \Delta V} \rangle \approx \sum_{k=0}^{n} \frac{\beta^k \langle \Delta V^k \rangle}{k!}$$
 
-where β = 1/(*k*<sub>B</sub>*T*) and *n* is the expansion order (default: 10).
-
-**Combined reweighting with WE weights:**
-
-For each frame *i*, the total reweighting factor is:
-
-$$w_{\text{total},i} = w_{\text{WE},i} \times \sum_{k=0}^{n} \frac{(\beta \Delta V_i)^k}{k!}$$
-
-The reweighted histogram is constructed as:
-
-$$H(A_j) = \sum_{i \in \text{bin } j} w_{\text{total},i}$$
-
-and the potential of mean force (PMF) is obtained:
-
-$$F(A_j) = -k_B T \ln H(A_j) + F_0$$
-
-**When to use:** The Maclaurin series is recommended when the boost potential distribution deviates significantly from Gaussian behavior or exhibits broad variance, as observed in chignolin and PPARα systems.
-
-#### Usage
+Recommended expansion order n=10. Each frame's reweight factor combines
+the GaMD boost and the WE walker weight; per-bin sums give the canonical
+probability, from which the PMF follows.
 
 ```bash
-python reweigh.py \
-    --input merged_data.dat \
-    --order 10 \
-    --T 300 \
-    --discX 0.5 \
-    --discY 0.5 \
-    --Xdim 0 10 \
-    --Ydim 0 12 \
-    --Emax 10.0
+python reweigh/reweigh.py \
+    --input merged_data.dat --order 10 --T 300 \
+    --discX 0.5 --discY 0.5 --Xdim 0 10 --Ydim 0 12 --Emax 10.0
 ```
 
-**Input file format** (4 columns, whitespace-delimited):
-```
-# CV1    CV2    DeltaV(kcal/mol)    WE_weight
-0.5      1.2    3.45                0.00125
-...
-```
+Input format (whitespace-delimited): `CV1  CV2  DeltaV(kcal/mol)  WE_weight`.
+Output: `pmf-<input>.xvg` with `X_center  Y_center  PMF(kcal/mol)`.
 
-**Parameters:**
+### Cumulant expansion
 
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `--input` | Input data file | Required |
-| `--order` | Maclaurin expansion order | 10 |
-| `--T` | Temperature (K) | 300 |
-| `--discX` | Bin width in X dimension | 0.5 |
-| `--discY` | Bin width in Y dimension | 0.5 |
-| `--Xdim` | X range: Xmin Xmax | Auto |
-| `--Ydim` | Y range: Ymin Ymax | Auto |
-| `--Emax` | Maximum free energy cutoff (kcal/mol) | 8.0 |
+When ΔV is near-Gaussian, the C2 / C3 cumulant expansion is more
+efficient and well-behaved. See [`reweigh/reweigh_CE.py`](reweigh/reweigh_CE.py)
+and the original ParGaMD paper for the math.
+
+### Chignolin-specific examples
+
+The repo also ships a working chignolin example built on top of these
+generic reweighters:
+
+- [`analyze/pmf_mc10.py`](analyze/pmf_mc10.py) — extracts (RMSD, Rg, ΔV,
+  WE_weight) from `west.h5`, applies MC-10 reweighting, plots the
+  2D PMF. Use as a starting point for your own system's PMF script.
+- [`reweight_compare.py`](reweight_compare.py) — side-by-side comparison
+  of WE-only, C2, and MC-10 PMFs for sanity checking.
 
 ---
 
-### Method 2: Cumulant Expansion (`reweigh_CE.py`)
+## Hardware notes
 
-When the boost potential follows a near-Gaussian distribution, the cumulant expansion to second (or third) order provides accurate and efficient reweighting.
+This fork is developed on a TRX50 + RTX 5090 + RTX 5070 workstation
+(consumer Blackwell, sm_120). Three hardware-specific issues came up
+during development and are documented in
+[BLACKWELL_NOTES.md](BLACKWELL_NOTES.md):
 
-**Cumulant expansion:**
+1. **ReBAR must be enabled** on both GPUs (BIOS-level — most consumer
+   boards default it off).
+2. **Integrator scalar readback after `loadCheckpoint` is corrupted**
+   on Blackwell — `runtime/gamd/runners.py` works around this by always
+   deriving `currentStep` from `state.getTime()`.
+3. **MPS routing**: under the shared sudo MPS daemon, multi-GPU work
+   distribution is ambiguous. `run_local.sh`'s `USE_MPS=1` mode uses
+   per-GPU user-mode daemons instead and is the recommended default
+   for multi-GPU runs.
 
-$$\langle e^{\beta \Delta V} \rangle_j \approx \exp(C_1 + C_2 + C_3)$$
-
-where the cumulants are defined as:
-
-$$C_1 = \beta \langle \Delta V \rangle_j$$
-
-$$C_2 = \frac{1}{2} \beta^2 \sigma^2_{\Delta V,j}$$
-
-$$C_3 = \frac{1}{6} \beta^3 \left( \langle \Delta V^3 \rangle_j - 3\langle \Delta V^2 \rangle_j \langle \Delta V \rangle_j + 2\langle \Delta V \rangle_j^3 \right)$$
-
-Here, ⟨ΔV⟩<sub>j</sub> is the mean boost potential in bin *j*, and σ²<sub>ΔV,j</sub> = ⟨ΔV²⟩<sub>j</sub> − ⟨ΔV⟩²<sub>j</sub> is the variance.
-
-**PMF with cumulant expansion:**
-
-$$F(A_j) = -k_B T \ln P^*(A_j) - C_1 - C_2 + F_0$$
-
-**Integration with WE weights:**
-
-The WE weights are incorporated by computing weighted averages within each bin:
-
-$$\langle \Delta V \rangle_j = \frac{\sum_{i \in \text{bin } j} w_{\text{WE},i} \cdot \Delta V_i}{\sum_{i \in \text{bin } j} w_{\text{WE},i}}$$
-
-**When to use:** The cumulant expansion is recommended when the boost potential distribution exhibits near-Gaussian behavior with low anharmonicity, as observed in the α-synuclein–PAL system.
-
-#### Usage
-
-**1D Reweighting:**
-
-```bash
-python reweigh_CE.py \
-    -input data_1D.dat \
-    -job amdweight_CE_WE \
-    -T 300 \
-    -disc 0.2 \
-    -Xdim 0 10 \
-    -cutoff 5 \
-    -Emax 8
-```
-
-**2D Reweighting:**
-
-```bash
-python reweigh_CE.py \
-    -input data_2D.dat \
-    -job amdweight_CE_WE_2D \
-    -T 300 \
-    -discX 0.2 \
-    -discY 0.2 \
-    -Xdim 0 10 \
-    -Ydim -2 2 \
-    -cutoff 10 \
-    -Emax 8
-```
-
-**Input file format:**
-
-For 1D: `RC  DeltaV  WE_weight`
-
-For 2D: `CV1  CV2  DeltaV  WE_weight`
-
-**Parameters:**
-
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `-input` | Input data file | Required |
-| `-job` | Job type: `amdweight_CE_WE` (1D) or `amdweight_CE_WE_2D` (2D) | Required |
-| `-T` | Temperature (K) | 300 |
-| `-disc` | Bin width for 1D | 0.2 |
-| `-discX`, `-discY` | Bin widths for 2D | 0.2 |
-| `-Xdim`, `-Ydim` | Dimension ranges | Auto |
-| `-cutoff` | Minimum total weight per bin for cumulant calculation | 10 |
-| `-Emax` | Maximum free energy cutoff (kcal/mol) | 8 |
-
----
-
-### Selection of Reweighting Method
-
-| System Characteristics | Recommended Method |
-|------------------------|-------------------|
-| Broad ΔV distribution, high variance | Maclaurin series (`reweigh.py`) |
-| Near-Gaussian ΔV distribution | Cumulant expansion (`reweigh_CE.py`) |
-| Uncertain distribution shape | Compare both; assess PMF convergence |
-
----
-
-## Usage Examples
-
-### Example: Chignolin Folding/Unfolding
-
-```bash
-# 1. Equilibrate GaMD parameters (4 ns)
-gamdRunner xml chignolin_equil.xml
-
-# 2. Run ParGaMD with WESTPA (using MPS on 12 GPUs, 8 segments/GPU)
-nvidia-cuda-mps-control -d
-w_run --work-manager processes --n-workers 96
-
-# 3. Extract trajectory data (CV1=RMSD, CV2=Rg, dV, WE_weight)
-python extract_pargamd_data.py --west-h5 west.h5 --output merged_data.dat
-
-# 4. Reweight using Maclaurin series
-python reweigh.py --input merged_data.dat --order 10 --T 300 \
-    --discX 0.5 --discY 0.5 --Xdim 0 10 --Ydim 3 10 --Emax 8
-```
-
----
-
-## Output Files
-
-### Maclaurin Series (`reweigh.py`)
-
-- `pmf-<input>.xvg`: 2D PMF file with columns `X_center  Y_center  PMF(kcal/mol)`
-
-### Cumulant Expansion (`reweigh_CE.py`)
-
-- `pmf_c1.xvg` / `pmf_c1_2D.xvg`: PMF with 1st-order cumulant correction
-- `pmf_c2.xvg` / `pmf_c2_2D.xvg`: PMF with 2nd-order cumulant correction
-- `pmf_c3.xvg` / `pmf_c3_2D.xvg`: PMF with 3rd-order cumulant correction
-
-
-
-<img width="1006" height="486" alt="image" src="https://github.com/user-attachments/assets/31893eb2-889a-4022-b60e-cc02054a3e07" />
+If you're on data-center hardware (A100, H100, GH200) these may not
+apply, but the workarounds are non-invasive and harmless.
 
 ---
 
 ## Citation
 
-If you use this software, please cite:
-
 ```bibtex
 @article{sonti2025pargamd,
-  title={Accelerating free energy exploration using parallelizable Gaussian accelerated molecular dynamics (ParGaMD)},
-  author={Sonti, Siddharth and Thyagatur, Anugraha and Wan, Hung-Yu and Hamelynck, Maxen and Faller, Roland and Ahn, Surl-Hee},
-  journal={https://doi.org/10.26434/chemrxiv-2025-rr5v9},
+  title={Accelerating free energy exploration using parallelizable
+         Gaussian accelerated molecular dynamics (ParGaMD)},
+  author={Sonti, Siddharth and Thyagatur, Anugraha and Wan, Hung-Yu
+          and Hamelynck, Maxen and Faller, Roland and Ahn, Surl-Hee},
+  journal={ChemRxiv},
   year={2025},
-  publisher={ChemRxiv: chemistry preprints}
+  doi={10.26434/chemrxiv-2025-rr5v9}
 }
 ```
 
@@ -338,8 +378,8 @@ If you use this software, please cite:
 
 ## License
 
-MIT License
+MIT.
 
 ## Contact
 
-For questions or issues, please open a GitHub issue or contact the authors.
+Open an issue on the repository.
