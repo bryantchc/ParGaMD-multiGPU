@@ -111,6 +111,8 @@ echo "[new_run] scaffold done"
 # Equilibration (optional)
 # ---------------------------------------------------------------------------
 if [ -n "$SEED_FROM" ]; then
+    # Import path: pcoord computation is not part of equilibrate.sh's flow
+    # in this branch (we're skipping it), so do it inline here.
     echo "[new_run] importing seed from $SEED_FROM (skipping equilibration)"
     mkdir -p "$RUN_DIR/equilibration/out"
     cp "$SEED_FROM/gamd_restart.checkpoint" "$RUN_DIR/equilibration/out/"
@@ -118,33 +120,29 @@ if [ -n "$SEED_FROM" ]; then
     ( cd "$RUN_DIR" && \
       ln -sfn equilibration/out/gamd_restart.checkpoint gamd_restart.checkpoint && \
       ln -sfn equilibration/out/gamd-restart.dat        gamd-restart.dat )
-elif [ "$SKIP_EQUIL" -eq 1 ]; then
-    echo "[new_run] --skip-equil: scaffold only, run ./equilibrate.sh inside the run dir when ready"
-else
-    ( cd "$RUN_DIR" && ./equilibrate.sh )
-fi
 
-# ---------------------------------------------------------------------------
-# Pre-compute basis-state pcoord (only when we actually have a seed wired)
-# ---------------------------------------------------------------------------
-if [ -f "$RUN_DIR/gamd_restart.checkpoint" ]; then
     echo "[new_run] computing basis-state pcoord…"
-    ( cd "$RUN_DIR" && \
-      ln -sfn "$SYSTEM_FROM/${SYSTEM}.rst7" "bstates/bstate0/output_restart.rst7" || \
-        ln -sfn "system/${SYSTEM}.rst7"     "bstates/bstate0/output_restart.rst7" )
+    ln -sfn "../../system/${SYSTEM}.rst7" "$RUN_DIR/bstates/bstate0/output_restart.rst7"
     PCOORD_TMP=$(mktemp)
     WEST_SIM_ROOT="$RUN_DIR" \
     WEST_STRUCT_DATA_REF="$RUN_DIR/bstates/bstate0" \
     WEST_PCOORD_RETURN="$PCOORD_TMP" \
         bash "$RUN_DIR/westpa_scripts/get_pcoord.sh"
     if [ -s "$PCOORD_TMP" ]; then
-        read -r RMSD RG < "$PCOORD_TMP"
-        printf "0 1 bstate0 %s %s\n" "$RMSD" "$RG" > "$RUN_DIR/bstates/bstates.txt"
+        read -r PC0 PC1 < "$PCOORD_TMP"
+        printf "0 1 bstate0 %s %s\n" "$PC0" "$PC1" > "$RUN_DIR/bstates/bstates.txt"
         echo "[new_run] bstates.txt: $(cat "$RUN_DIR/bstates/bstates.txt")"
     else
-        echo "[new_run] WARN: pcoord computation produced no output — bstates.txt left as default" >&2
+        echo "[new_run] WARN: pcoord computation produced no output" >&2
     fi
     rm -f "$PCOORD_TMP"
+elif [ "$SKIP_EQUIL" -eq 1 ]; then
+    echo "[new_run] --skip-equil: scaffold only. When ready:"
+    echo "[new_run]   cd $RUN_DIR && ./equilibrate.sh"
+    echo "[new_run] (equilibrate.sh also computes the basis-state pcoord at the end.)"
+else
+    # equilibrate.sh runs equilibration AND computes basis-state pcoord.
+    ( cd "$RUN_DIR" && ./equilibrate.sh )
 fi
 
 cat <<EOF
