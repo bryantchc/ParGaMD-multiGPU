@@ -49,7 +49,20 @@ else
     exit 1
 fi
 
-TOPO="$PARGAMD_SYSTEM_DIR/${SYSTEM_NAME}.parm7"
+# Topology override.
+#
+# A basis state harvested from a previous run may hold a SOLVENT-STRIPPED frame
+# (its full positions/velocities live in gamd_restart.checkpoint, which is what
+# actually seeds the MD; the frame here only ever reports an initial pcoord).
+# Such a frame must be read against the stripped topology. Rather than sniffing
+# atom counts, a state directory may carry topology_override.txt containing the
+# path to use; make_bstates.py writes it. Absent that file, behaviour is
+# unchanged.
+if [ -f topology_override.txt ]; then
+    TOPO="$(cat topology_override.txt)"
+else
+    TOPO="$PARGAMD_SYSTEM_DIR/${SYSTEM_NAME}.parm7"
+fi
 REF_PDB="$PARGAMD_SYSTEM_DIR/${SYSTEM_NAME}.pdb"
 [ -f "$REF_PDB" ] || REF_PDB="-"
 

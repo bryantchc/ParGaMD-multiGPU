@@ -57,10 +57,31 @@ sed -i 's|<directory>.*</directory>|<directory>.</directory>|' input.xml
 #   - Falling out of the loop on first success (non-empty output_restart.dcd).
 GAMD_RUNNER="$PARGAMD_RUNTIME_DIR/gamdRunner"
 GAMD_CHECKPOINT_SEED="$WEST_SIM_ROOT/gamd_restart.checkpoint"
-if [ "$WEST_CURRENT_ITER" -eq 1 ]; then
-    PARENT_CHECKPOINT="$GAMD_CHECKPOINT_SEED"
-else
+
+# Per-basis-state checkpoints.
+#
+# A run may start from ONE structure (the classic case: a single bstate0 whose
+# coordinates come from equilibration) or from MANY different structures, e.g.
+# harvested from a previous run with westpa_scripts/make_bstates.py. In the
+# multi-state case each basis state carries its own gamd_restart.checkpoint
+# holding that walker's positions, velocities and GaMD state.
+#
+# WESTPA sets WEST_PARENT_DATA_REF to the BASIS STATE directory for any segment
+# whose initpoint_type is NEWTRAJ and whose initial state has type BASIS -- see
+# westpa/core/propagators/executable.py, where
+#     environ[ENV_PARENT_DATA_REF] = environ[ENV_BSTATE_DATA_REF]
+# for ISTATE_TYPE_BASIS, which is what `gen_istates: false` produces. That
+# covers iteration 1 AND any later segment restarted from a basis state, which
+# is why the rule below is applied every iteration rather than only at
+# iteration 1: with a target state configured, recycled walkers take the same
+# path and must also find their basis state's checkpoint.
+#
+# Single-structure runs are unaffected: bstate0 carries no checkpoint, so the
+# global seed is used exactly as before.
+if [ -f "$WEST_PARENT_DATA_REF/gamd_restart.checkpoint" ]; then
     PARENT_CHECKPOINT="$WEST_PARENT_DATA_REF/gamd_restart.checkpoint"
+else
+    PARENT_CHECKPOINT="$GAMD_CHECKPOINT_SEED"
 fi
 
 MAX_RETRIES=3
@@ -152,13 +173,27 @@ if [ "$SUCCESS" -ne 1 ]; then
         # Iter 1: parent is the basis state (single-frame .rst7). Synthesize
         # a 100-frame DCD by replicating the rst7 coordinates so downstream
         # MDAnalysis pcoord computation produces 100 (identical) rows.
+        # A basis state harvested from a previous run may hold a SOLVENT-STRIPPED
+        # frame (it is only ever read by get_pcoord.sh, which honours
+        # topology_override.txt). Replicating such a frame here would produce a
+        # segment with the wrong atom count, so fail loudly instead.
         python <<EOF
+import sys
 import MDAnalysis as mda
-u = mda.Universe("topology.parm7", "$WEST_PARENT_DATA_REF/output_restart.rst7", format="INPCRD")
+try:
+    u = mda.Universe("topology.parm7", "$WEST_PARENT_DATA_REF/output_restart.rst7", format="INPCRD")
+except Exception as exc:
+    sys.exit("freeze-fallback: cannot read basis state against topology.parm7 (%s). "
+             "If this basis state holds a stripped frame, drop it from bstates.txt "
+             "and re-run init.sh." % exc)
 with mda.Writer("output_restart.dcd", u.atoms.n_atoms) as W:
     for _ in range(100):
         W.write(u.atoms)
 EOF
+        if [ $? -ne 0 ]; then
+            echo "[runseg] FATAL iter=$WEST_CURRENT_ITER seg=$WEST_CURRENT_SEG_ID: freeze-fallback failed for basis state $WEST_PARENT_DATA_REF" >&2
+            exit 1
+        fi
     else
         echo "Error: parent state has neither DCD nor rst7 at $WEST_PARENT_DATA_REF; cannot freeze walker"
         ls -lh "$WEST_PARENT_DATA_REF" 2>/dev/null
