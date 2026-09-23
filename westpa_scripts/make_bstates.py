@@ -110,9 +110,19 @@ SYSTEM_NAME = os.environ.get("SYSTEM_NAME", "")
 
 
 def load_cv0(root):
-    """Import this run's cv_0.py so selection uses exactly the production CV."""
+    """Import the run's first CV so selection uses exactly the production CV.
+
+    The dispatcher globs cv_*.py and sorts lexically, so dimension 0 is whatever
+    sorts first. That may be a bare cv_0.py or a descriptive name such as
+    cv_0_pam_readout.py, so match the same way rather than assuming cv_0.py.
+    """
+    import glob as _glob
     os.environ.setdefault("WEST_SIM_ROOT", root)
-    path = os.path.join(root, "cv_0.py")
+    matches = sorted(_glob.glob(os.path.join(root, "cv_0*.py")))
+    if not matches:
+        sys.exit("no cv_0*.py found in %s -- is that the run directory?" % root)
+    path = matches[0]
+    print("[cv] scoring with %s" % os.path.basename(path))
     spec = importlib.util.spec_from_file_location("cv_0", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
