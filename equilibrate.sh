@@ -33,6 +33,10 @@ EQ_OUT="$EQ_DIR/out"
 SEED_CKPT="$EQ_OUT/gamd_restart.checkpoint"
 SEED_DAT="$EQ_OUT/gamd-restart.dat"
 
+echo "CV_0_PATH variable is $CV_0_PATH"
+echo "CV_1_PATH variable is $CV_1_PATH"
+echo "CV_2_PATH variable is $CV_2_PATH"
+
 # Wire equilibration/'s topology + coords symlinks to the current SYSTEM_NAME.
 # input.xml in $EQ_DIR is already system-agnostic (refers to topology.parm7
 # and coordinates.rst7) so only these two symlinks change between systems.

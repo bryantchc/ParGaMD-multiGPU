@@ -289,7 +289,7 @@ w_run --work-manager=zmq \
       --zmq-write-host-info="$SERVER_INFO" \
       --zmq-comm-mode=tcp \
       "$@" \
-      &> "west_master.log" &
+      &>> "west_master.log" &
 MASTER_PID=$!
 
 # Wait up to 60 s for the master to publish $SERVER_INFO.

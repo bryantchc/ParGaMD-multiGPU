@@ -188,10 +188,10 @@ fi
 ##############################################################################
 # 8) Optional debugging
 ##############################################################################
-#if [ -n "\$SEG_DEBUG" ]; then
-#    echo "Preview of $WEST_PCOORD_RETURN:"
-#    head -v "$WEST_PCOORD_RETURN"
-#fi
+if [ -n "\$SEG_DEBUG" ]; then
+    echo "Preview of $WEST_PCOORD_RETURN:"
+    head -v "$WEST_PCOORD_RETURN"
+fi
 
 echo "Segment run completed successfully."
 exit 0

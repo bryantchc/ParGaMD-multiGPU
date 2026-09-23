@@ -18,7 +18,7 @@ source env.sh
 
 
 # Clean up from previous/ failed runs
-rm -rf traj_segs seg_logs istates west.h5
+rm -rf traj_segs seg_logs istates west.h5 *.log  # added log removal
 mkdir   seg_logs traj_segs istates
 
 # Refresh the basis-state coords symlink to match the current SYSTEM_NAME.
