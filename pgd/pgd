@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# pgd -- ParGaMD run analysis interface.
+#
+# One dispatcher, one file per capability. Subcommands live in cmds/ and are
+# discovered by filename: there is no registry to update. The extension picks
+# the interpreter (.py -> the pargamd env's python, .sh -> bash).
+#
+# This file is symlinked from the shared repo into each run dir, so:
+#   readlink -f $0        -> the repo (where cmds/ and lib/ live)
+#   dirname $BASH_SOURCE  -> the run dir (where west.cfg lives)
+set -euo pipefail
+
+PGD_SELF="${BASH_SOURCE[0]}"
+PGD_HOME="$(cd "$(dirname "$(readlink -f "$PGD_SELF")")" && pwd)"
+PGD_INVOKED_DIR="$(cd "$(dirname "$PGD_SELF")" && pwd)"
+export PGD_HOME PGD_INVOKED_DIR
+
+# shellcheck source=lib/common.sh
+source "$PGD_HOME/lib/common.sh"
+
+PGD_VERSION="$(cat "$PGD_HOME/VERSION" 2>/dev/null || echo 0)"
+export PGD_VERSION
+
+usage() {
+    cat <<EOF
+pgd $PGD_VERSION -- analysis for ParGaMD (WESTPA + GaMD) runs
+
+Turns a point on the explored free-energy surface into the continuous
+trajectory that reached it: pick a point, find the walkers there, walk one
+walker's ancestry back to the initial parent, and open that whole path as a
+single trajectory in vmd_2.
+
+usage: pgd [global flags] <command> [args]
+       pgd <command> --help        full options for one command
+
+EOF
+    local f name summary group g last=""
+    # Commands are discovered from cmds/ -- line 2 is "# summary:", line 3 is
+    # "# group: <order> <label>". Adding a command file is all it takes.
+    for g in 1 2 3 4 5; do
+        for f in "$PGD_HOME"/cmds/*; do
+            [[ -f "$f" ]] || continue
+            group="$(sed -n '3s/^# group: //p' "$f")"
+            [[ "${group%% *}" == "$g" ]] || continue
+            if [[ "$last" != "$g" ]]; then
+                printf '%s:\n' "${group#* }"
+                last="$g"
+            fi
+            name="$(basename "$f")"; name="${name%.*}"
+            summary="$(sed -n '2s/^# summary: //p' "$f")"
+            printf '  %-12s %s\n' "$name" "$summary"
+        done
+        [[ "$last" == "$g" ]] && printf '\n'
+    done
+    cat <<EOF
+examples:
+  pgd doctor --scan-solvent               health, tools, which iters are full-atom
+  pgd fes --pick                          render the PMF, click a basin
+  pgd find --cv 8.91,6.27 --tol 0.17      which walkers visited that point
+  pgd trace --tip 113:46                  its ancestry, and what each segment gives
+  pgd strip-copy --for-lineage 113:46     normalize full-atom ancestors (copies only)
+  pgd load --tip 113:46 --colvars         open it in vmd_2 with cv0/cv1 live
+  pgd export --tip 113:46 --out lin.nc --stride 50 --mask ':1-1316'
+  pgd info --iter 58 --seg 262            weight, parent, children, boost dV
+
+  # the whole workflow: point on the PES -> trajectory on screen
+  TIP=\$(pgd find --cv 8.91,6.27 --tol 0.17 --print-tip)
+  pgd strip-copy --for-lineage \$TIP && pgd load --tip \$TIP --colvars
+
+global flags:
+  --root DIR     run directory (default: \$WEST_SIM_ROOT, else this script's dir)
+  --cache DIR    cache root (default: <traj_segs>/../pgd_cache)
+  -v, --verbose  chattier
+  -n, --dry-run  print what would run; write nothing
+  --yes          assume yes at confirmation prompts
+  -h, --help     this text
+
+environment:
+  PGD_LOAD_WARN_GB   size-gate threshold in GiB (default 95)
+  PGD_CACHE          cache root override
+  PGD_H5_NO_LOCK     read west.h5 without taking the HDF5 lock (for a live run)
+  PGD_VMD            vmd binary (default /usr/local/bin/vmd_2)
+
+behaviour worth knowing:
+  * Original trajectory data is NEVER modified. Full-atom iterations are
+    normalized by stripping COPIES into the cache; pgd refuses any write that
+    resolves under traj_segs (pgd strip-copy --selftest proves it).
+  * A lineage is normalized to one atom count; if an ancestor is still
+    full-atom, pgd stops and names the exact strip-copy command to run.
+  * --stride is applied on the global concatenated timeline, so the spacing
+    stays uniform across segment boundaries.
+  * Whether a child's first frame duplicates its parent's last is MEASURED per
+    lineage (--seam auto), not assumed. In this run it does not.
+  * pgd load writes no trajectory; pgd export is the command that does.
+  * Before loading, both disk and live RAM are checked and a stride offered.
+
+exit codes: 0 ok  1 error  3 size gate (non-interactive)  4 declined
+            5 needs strip-copy
+EOF
+}
+
+# Global flags are only recognised BEFORE the command name. Everything from
+# the command onwards belongs to the subcommand -- otherwise `pgd load --help`
+# would print this text instead of load's own options.
+ROOT_ARG=""
+CACHE_ARG=""
+ARGS=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --root)     ROOT_ARG="${2:?--root needs a directory}"; shift 2 ;;
+        --root=*)   ROOT_ARG="${1#*=}"; shift ;;
+        --cache)    CACHE_ARG="${2:?--cache needs a directory}"; shift 2 ;;
+        --cache=*)  CACHE_ARG="${1#*=}"; shift ;;
+        -v|--verbose) export PGD_VERBOSE=1; shift ;;
+        -n|--dry-run) export PGD_DRY_RUN=1; shift ;;
+        --yes)      export PGD_YES=1; shift ;;
+        -h|--help)  usage; exit 0 ;;
+        --version)  echo "pgd $PGD_VERSION"; exit 0 ;;
+        *)          ARGS=("$@"); break ;;   # command + its own args, verbatim
+    esac
+done
+
+[[ ${#ARGS[@]} -gt 0 ]] || { usage; exit 1; }
+cmd="${ARGS[0]}"
+rest=("${ARGS[@]:1}")
+
+if [[ "$cmd" == "help" ]]; then
+    if [[ ${#rest[@]} -eq 0 ]]; then usage; exit 0; fi
+    cmd="${rest[0]}"; rest=(--help)
+fi
+
+WEST_SIM_ROOT="$(pgd_resolve_root "$ROOT_ARG")"
+export WEST_SIM_ROOT
+pgd_activate_env "$WEST_SIM_ROOT"
+
+[[ -n "$CACHE_ARG" ]] && export PGD_CACHE="$CACHE_ARG"
+
+export PGD_PY="$CONDA_PREFIX/bin/python"
+export PGD_CPPTRAJ="$CONDA_PREFIX/bin/cpptraj"
+export PGD_VMD="${PGD_VMD:-/usr/local/bin/vmd_2}"
+export PGD_CATDCD="${PGD_CATDCD:-/usr/local/lib/vmd_2/plugins/LINUXAMD64/bin/catdcd5.2/catdcd}"
+export PYTHONPATH="$PGD_HOME/lib${PYTHONPATH:+:$PYTHONPATH}"
+
+for ext in py sh; do
+    f="$PGD_HOME/cmds/$cmd.$ext"
+    [[ -f "$f" ]] || continue
+    # exec so Ctrl-C reaches a long cpptraj/VMD run directly.
+    case "$ext" in
+        py) exec "$PGD_PY" "$f" "${rest[@]+"${rest[@]}"}" ;;
+        sh) exec bash      "$f" "${rest[@]+"${rest[@]}"}" ;;
+    esac
+done
+
+pgd_die "unknown command '$cmd' (try: pgd --help)"

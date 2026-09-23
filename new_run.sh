@@ -11,6 +11,7 @@
 #     system/<name>.{parm7,rst7,pdb}               ← copied from --system-from
 #     runtime/        westpa_scripts/  bench/      ← symlinks to this repo
 #     equilibrate.sh  run_local.sh    init.sh      ← symlinks to this repo
+#     pgd                                          ← symlink to this repo (analysis CLI)
 #
 # Then runs equilibration (~60 min) and pre-computes the basis-state pcoord
 # so the run is one ./run_local.sh away from production.
@@ -96,6 +97,10 @@ ln -s "$REPO_DIR/bench"           "$RUN_DIR/bench"
 ln -s "$REPO_DIR/run_local.sh"    "$RUN_DIR/run_local.sh"
 ln -s "$REPO_DIR/equilibrate.sh"  "$RUN_DIR/equilibrate.sh"
 ln -s "$REPO_DIR/init.sh"         "$RUN_DIR/init.sh"
+# Analysis interface. Symlink the dispatcher FILE, not the pgd/ directory,
+# so `readlink -f` finds the repo (cmds/, lib/) while `dirname $BASH_SOURCE`
+# finds this run dir (west.cfg, env.sh).
+ln -s "$REPO_DIR/pgd/pgd"         "$RUN_DIR/pgd"
 
 # Templates → run dir, with SYSTEM_NAME substitution.
 sed "s|__SYSTEM_NAME__|$SYSTEM|g" "$REPO_DIR/templates/env.sh.template"   > "$RUN_DIR/env.sh"
