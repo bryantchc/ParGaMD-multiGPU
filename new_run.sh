@@ -84,6 +84,20 @@ echo "[new_run]   code dir (this repo): $REPO_DIR"
 # ---------------------------------------------------------------------------
 mkdir -p "$RUN_DIR/system" "$RUN_DIR/bstates/bstate0" "$RUN_DIR/equilibration"
 
+# traj_segs goes on scratch, not the boot drive. See templates/env.sh.template.
+: "${PARGAMD_SCRATCH_ROOT:=/scratch/pool}"
+RUN_NAME="$(basename "$RUN_DIR")"
+if [ -d "$PARGAMD_SCRATCH_ROOT" ] && [ -w "$PARGAMD_SCRATCH_ROOT" ]; then
+    TRAJ_TARGET="$PARGAMD_SCRATCH_ROOT/$RUN_NAME/traj_segs"
+    mkdir -p "$TRAJ_TARGET"
+    ln -sfn "$TRAJ_TARGET" "$RUN_DIR/traj_segs"
+    echo "[new_run] traj_segs -> $TRAJ_TARGET"
+else
+    mkdir -p "$RUN_DIR/traj_segs"
+    echo "[new_run] WARNING: $PARGAMD_SCRATCH_ROOT not usable; traj_segs is LOCAL"
+    echo "[new_run]          to $RUN_DIR. Large runs will fill this filesystem."
+fi
+
 # System files — copy by default (self-contained run dir). Users who want
 # library-style sharing can `mv` the copies and re-symlink by hand.
 cp "$SYSTEM_FROM/${SYSTEM}.parm7" "$RUN_DIR/system/${SYSTEM}.parm7"

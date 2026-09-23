@@ -18,8 +18,36 @@ source env.sh
 
 
 # Clean up from previous/ failed runs
-rm -rf traj_segs seg_logs istates west.h5 *.log  # added log removal
-mkdir   seg_logs traj_segs istates
+rm -rf seg_logs istates west.h5 *.log
+mkdir -p seg_logs istates
+
+# traj_segs is usually a SYMLINK into a scratch pool (see
+# templates/env.sh.template). `rm -rf traj_segs` would delete the link and the
+# following mkdir would silently recreate it as a real directory on whatever
+# filesystem the run dir lives on -- typically the boot drive -- while orphaning
+# the old data in the pool. So clear the link's TARGET and keep the link.
+if [ -L traj_segs ]; then
+    TRAJ_TARGET="$(readlink -f traj_segs)"
+    case "$TRAJ_TARGET" in
+        ""|"/"|"$HOME") echo "[init] refusing to clear traj_segs target '$TRAJ_TARGET'"; exit 1 ;;
+    esac
+    echo "[init] traj_segs -> $TRAJ_TARGET (preserving symlink, clearing contents)"
+    mkdir -p "$TRAJ_TARGET"
+    find "$TRAJ_TARGET" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+else
+    rm -rf traj_segs
+    : "${PARGAMD_SCRATCH_ROOT:=/scratch/pool}"
+    RUN_NAME="$(basename "$WEST_SIM_ROOT")"
+    if [ -d "$PARGAMD_SCRATCH_ROOT" ] && [ -w "$PARGAMD_SCRATCH_ROOT" ]; then
+        TRAJ_TARGET="$PARGAMD_SCRATCH_ROOT/$RUN_NAME/traj_segs"
+        mkdir -p "$TRAJ_TARGET"
+        ln -sfn "$TRAJ_TARGET" traj_segs
+        echo "[init] traj_segs -> $TRAJ_TARGET"
+    else
+        mkdir -p traj_segs
+        echo "[init] WARNING: $PARGAMD_SCRATCH_ROOT not usable; traj_segs is LOCAL"
+    fi
+fi
 
 BSTATE_FILE="$WEST_SIM_ROOT/bstates/bstates.txt"
 N_BSTATES=$(grep -cE '^[[:space:]]*[^#[:space:]]' "$BSTATE_FILE" 2>/dev/null || true)
