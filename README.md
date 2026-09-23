@@ -77,8 +77,9 @@ pargamd/                          # this repo
 ├── templates/                    # per-system templates copied into each run dir
 │   ├── env.sh.template
 │   ├── west.cfg.template
-│   ├── input.xml.template                  # production GaMD per-segment
-│   ├── equilibration_input.xml.template    # Phase-1 GaMD equilibration
+│   ├── input.xml.template                  # production GaMD per-segment (Cas12a-scale)
+│   ├── equilibration_input.xml.template    # Phase-1 GaMD equilibration (Cas12a-scale)
+│   ├── examples/chignolin/                 # original chignolin-tuned XMLs (not default)
 │   ├── cv_0.py.template                    # CV definitions, one per pcoord dim
 │   ├── cv_1.py.template                    #   default: CA-RMSD + CA Rg
 │   └── bstates.txt.template

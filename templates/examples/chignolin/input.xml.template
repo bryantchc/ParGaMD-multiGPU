@@ -1,6 +1,6 @@
 <?xml version="1.0" ?>
 <gamd>
-    <temperature>300</temperature> <!-- unit.kelvin  -->
+    <temperature>300</temperature> <!-- unit.kelvin -->
 
     <system>
         <nonbonded-method>PME</nonbonded-method>
@@ -8,23 +8,23 @@
         <constraints>HBonds</constraints>
     </system>
 
-    <!--barostat>
-        <pressure>1.0</pressure> 
+    <barostat>
+        <pressure>1.0</pressure> <!-- unit.bar -->
         <frequency>25</frequency>
-    </barostat-->  <!-- barostat Disabled for Cas12a --> 
+    </barostat>
     
     <run-minimization>False</run-minimization>
 
     <integrator>
         <algorithm>langevin</algorithm>
-        <boost-type>lower-dual-nonbonded-dihedral</boost-type> <!-- use lower-dual for Cas12a Sized systems --> 
+	<boost-type>upper-dual</boost-type> <!-- lower-dual upper-dual-nonbonded-dihedral ... etc  --> 
         <sigma0>
             <primary>6.0</primary> <!-- unit.kilocalories_per_mole (paper: σ0_P = 6.0 kcal/mol) -->
             <secondary>6.0</secondary> <!-- unit.kilocalories_per_mole (paper: σ0_D = 6.0 kcal/mol) -->
         </sigma0>
 	<random-seed>0</random-seed>  <!-- 0 = OpenMM auto-seeds each Context (each segment gets a unique seed). 10 was upstream's testing override. -->
 
-        <dt>0.004</dt> <!-- unit.picoseconds -->
+        <dt>0.002</dt> <!-- unit.picoseconds -->
         <friction-coefficient>1.0</friction-coefficient> <!-- unit.picoseconds**-1 -->
         <number-of-steps>
             <conventional-md-prep>0</conventional-md-prep>
@@ -32,8 +32,8 @@
             <gamd-equilibration-prep>0</gamd-equilibration-prep>
             <gamd-equilibration>0</gamd-equilibration>
             <gamd-production>0</gamd-production>
-            <extension-steps>50000</extension-steps> <!-- 500 ps, one quarter of averaging-window-interval --> 
-            <averaging-window-interval>500000</averaging-window-interval>
+            <extension-steps>50000</extension-steps>
+            <averaging-window-interval>50000</averaging-window-interval>
         </number-of-steps>
 
     </integrator>
@@ -62,11 +62,6 @@
                 <file-type>dcd</file-type>
             </coordinates>
             <statistics>
-                <!-- Also sets the DCD coordinates_interval and
-                     restart_checkpoint_interval (parser quirk in
-                     gamd/parser.py). Must satisfy
-                     extension-steps / interval == pcoord_len (west.cfg).
-                     125,000 / 1,250 = 100 frames per segment. -->
                 <interval>500</interval>
             </statistics>
         </reporting>
