@@ -1,6 +1,6 @@
 <?xml version="1.0" ?>
 <gamd>
-    <temperature>300</temperature> <!-- unit.kelvin (paper: chignolin runs at 300 K) -->
+    <temperature>300</temperature> <!-- unit.kelvin -->
 
     <system>
         <nonbonded-method>PME</nonbonded-method>
@@ -13,11 +13,11 @@
         <frequency>25</frequency>
     </barostat>
     
-    <run-minimization>True</run-minimization>
+    <run-minimization>False</run-minimization>
 
     <integrator>
         <algorithm>langevin</algorithm>
-        <boost-type>upper-dual</boost-type>
+	<boost-type>upper-dual</boost-type> <!-- lower-dual upper-dual-nonbonded-dihedral ... etc  --> 
         <sigma0>
             <primary>6.0</primary> <!-- unit.kilocalories_per_mole (paper: σ0_P = 6.0 kcal/mol) -->
             <secondary>6.0</secondary> <!-- unit.kilocalories_per_mole (paper: σ0_D = 6.0 kcal/mol) -->

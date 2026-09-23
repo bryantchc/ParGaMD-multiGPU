@@ -6,12 +6,13 @@
 
     Step counts match the ParGaMD paper (Sonti974948/ParGaMD cMD/md_cmd.in,
     AMBER ntcmd=1M, nteb=1M, ntcmdprep=ntebprep=200k, ntave=50k):
-        cMD-prep            200k  (0.4 ns)  - relaxation, no Vstat
-        cMD                 800k  (1.6 ns)  - cMD with Vstat collection
-        GaMD-eq-prep        200k  (0.4 ns)  - pre-boost relaxation
-        GaMD-eq             800k  (1.6 ns)  - boost applied, params refined
-        GaMD-prod           0              - paper has none
-        averaging-window    50k   (0.1 ns)  - rolling avg interval
+                            Chingolin (2fs dt)    Cas12a (4fs dt)
+        cMD-prep            200k  (0.4 ns)        500k (2 ns)    - relaxation, no Vstat
+        cMD                 800k  (1.6 ns)        25M (100 ns)   - cMD with Vstat collection
+        GaMD-eq-prep        200k  (0.4 ns)        500k (2ns)     - pre-boost relaxation
+        GaMD-eq             800k  (1.6 ns)        15M (60 ns)    - boost applied, params refined
+        GaMD-prod           0                     0              - paper has none
+        averaging-window    50k   (0.1 ns)        500k (2ns)     - rolling avg interval
 
     dt = 2 fs, σ0_P = σ0_D = 6.0 kcal/mol, T = 300 K, γ = 1.0 ps⁻¹.
     Total 2M steps = 4 ns wallclock.
