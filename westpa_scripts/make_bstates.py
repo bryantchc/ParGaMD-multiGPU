@@ -109,6 +109,9 @@ RUN_ROOT = os.environ.get("WEST_SIM_ROOT", os.path.dirname(HERE))
 SYSTEM_NAME = os.environ.get("SYSTEM_NAME", "")
 
 
+CV_FILE = []
+
+
 def load_cv0(root):
     """Import the run's first CV so selection uses exactly the production CV.
 
@@ -123,6 +126,7 @@ def load_cv0(root):
         sys.exit("no cv_0*.py found in %s -- is that the run directory?" % root)
     path = matches[0]
     print("[cv] scoring with %s" % os.path.basename(path))
+    CV_FILE.append(os.path.basename(path))
     spec = importlib.util.spec_from_file_location("cv_0", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -146,7 +150,7 @@ def refresh_weights(out_dir):
 
     lines = ["# basis states harvested from %s iteration %s"
              % (man.get("source", "?"), man.get("source_iteration", "?")),
-             "# selection: cv_0 (PAM-duplex RMSD to 5B43) < %s A" % man.get("cut_angstrom", "?"),
+             "# selection: %s < %s" % (man.get("cv_file", "cv_0"), man.get("cut_angstrom", "?")),
              "# weights: source WE weights renormalised over the retained set",
              "# name  probability  auxref"]
     for st, p in zip(states, wn):
@@ -182,6 +186,11 @@ def main():
                     help="cap the number of basis states, keeping the best by cv_0")
     ap.add_argument("--link", action="store_true",
                     help="symlink checkpoints instead of copying them")
+    ap.add_argument("--uniform-weights", action="store_true",
+                    help="give every retained state weight 1/N instead of "
+                         "renormalising the source WE weights. Use this when the "
+                         "source weights span many orders of magnitude -- see the "
+                         "effective-state count printed below.")
     ap.add_argument("--out", default=None,
                     help="output bstates dir; default <run-root>/bstates")
     ap.add_argument("--dry-run", action="store_true")
@@ -295,7 +304,20 @@ def main():
     if w.sum() <= 0:
         print("[warn] retained weights sum to 0; falling back to uniform weights")
         w = np.ones(len(keep))
-    wn = exact_normalise(w)
+    neff_src = 1.0 / np.sum((w / w.sum()) ** 2) if w.sum() > 0 else 0.0
+    if args.uniform_weights:
+        print("[wts]  --uniform-weights: using 1/N for all %d states" % len(w))
+        wn = exact_normalise(np.ones(len(w)))
+    else:
+        wn = exact_normalise(w)
+    neff = 1.0 / np.sum(wn ** 2)
+    print("[wts]  effective states: %.1f of %d  (source weights would give %.1f)"
+          % (neff, len(wn), neff_src))
+    if not args.uniform_weights and neff < 0.25 * len(wn):
+        print("[wts]  WARNING: the source weights concentrate on %.0f%% of the retained"
+              % (100.0 * neff / len(wn)))
+        print("[wts]           states; the rest start with negligible weight and will be")
+        print("[wts]           merged away almost immediately. Consider --uniform-weights.")
     resid = 1.0 - float(wn.sum())
     print("[wts]  renormalised %d weights, sum-1 = %.3e, min=%.3e, max=%.3e"
           % (len(wn), resid, wn.min(), wn.max()))
@@ -322,9 +344,12 @@ def main():
         shutil.rmtree(args.out)
     os.makedirs(args.out)
 
+    cvname = CV_FILE[0] if CV_FILE else "cv_0"
+    wdesc = ("uniform, 1/N" if args.uniform_weights
+             else "source WE weights renormalised over the retained set")
     lines = ["# basis states harvested from %s iteration %d" % (src, args.iter),
-             "# selection: cv_0 (PAM-duplex RMSD to 5B43) < %.2f A" % args.cut,
-             "# weights: source WE weights renormalised over the retained set",
+             "# selection: %s < %.4g" % (cvname, args.cut),
+             "# weights: %s" % wdesc,
              "# name  probability  auxref"]
     manifest = []
     for i, ((seg, w_src, r), p) in enumerate(zip(keep, wn)):
@@ -361,6 +386,8 @@ def main():
         fo.write("\n".join(lines) + "\n")
     with open(os.path.join(args.out, "manifest.json"), "w") as fo:
         json.dump({"source": src, "source_iteration": args.iter, "cut_angstrom": args.cut,
+                   "cv_file": (CV_FILE[0] if CV_FILE else "cv_0"),
+                   "weighting": ("uniform" if args.uniform_weights else "renormalised_source"),
                    "n_states": len(manifest), "states": manifest}, fo, indent=2)
 
     print("\n[out] %d basis states -> %s" % (len(manifest), args.out))
