@@ -168,6 +168,120 @@ def refresh_weights(out_dir):
     print("[refresh] wrote %s/bstates.txt (state directories untouched)" % out_dir)
 
 
+def build_from_selection(args, mda, h5py):
+    """Harvest an explicit list of (iteration, segment) walkers, possibly across
+    several iterations.
+
+    Exists because the right selection criterion is often NOT the driven
+    coordinate. In this project, selecting basis states by the run's own cv_0
+    twice discarded the structurally best frames -- the winners by independent
+    contact recovery sat mid-range on cv_0. Weights are forced uniform: WE
+    weights from different iterations are not on a common scale, and the
+    structures here were chosen on merit rather than probability.
+    """
+    import shutil, json as _json
+    import numpy as _np
+
+    sel = _json.load(open(args.select_file))
+    pairs = [(int(a), int(b)) for a, b in sel["pairs"]]
+    print("[sel] %d walkers from %s" % (len(pairs), args.select_file))
+    if sel.get("criterion"):
+        print("[sel] criterion: %s" % sel["criterion"])
+
+    strip_top = os.path.join(args.run_root, "system", args.system + ".stripped.parm7")
+    full_top = os.path.join(args.run_root, "system", args.system + ".parm7")
+
+    if os.path.isdir(args.out):
+        shutil.rmtree(args.out)
+    os.makedirs(args.out)
+
+    # atom count -> topology, computed once
+    top_by_natoms = {}
+    for t in (strip_top, full_top):
+        if os.path.exists(t):
+            try:
+                top_by_natoms[mda.Universe(t).atoms.n_atoms] = t
+            except Exception:
+                pass
+    if not top_by_natoms:
+        sys.exit("no usable topology in %s" % os.path.join(args.run_root, "system"))
+    print("[top] known topologies: %s"
+          % ", ".join("%s=%d atoms" % (os.path.basename(v), k) for k, v in sorted(top_by_natoms.items())))
+
+    wn = exact_normalise(_np.ones(len(pairs)))
+    print("[wts]  uniform, 1/N -> %d effective states" % len(wn))
+
+    lines = ["# basis states harvested from %s" % args.source,
+             "# selection: %s" % sel.get("criterion", args.select_file),
+             "# weights: uniform, 1/N",
+             "# name  probability  auxref"]
+    manifest = []
+    u = None
+    written = 0
+    for i, ((it, seg), p) in enumerate(zip(pairs, wn)):
+        srcd = os.path.join(args.source, "traj_segs", "%06d" % it, "%06d" % seg)
+        ck = os.path.join(srcd, "gamd_restart.checkpoint")
+        dcd = os.path.join(srcd, "output_restart.dcd")
+        if not (os.path.exists(ck) and os.path.exists(dcd)):
+            print("  [skip] iter %d seg %d: missing checkpoint or dcd" % (it, seg))
+            continue
+        # Pick the topology by ATOM COUNT, not by trying load_new in a loop.
+        # Reusing one Universe for detection is wrong: after the first file,
+        # load_new succeeds against the topology already bound, so the loop
+        # records whichever topology it happened to be testing rather than the
+        # one actually in use. That silently wrote the stripped topology into
+        # topology_override.txt for every state after the first, and w_init then
+        # failed on all of them with an atom-count mismatch.
+        try:
+            n_dcd = mda.coordinates.DCD.DCDReader(dcd).n_atoms
+        except Exception as exc:
+            print("  [skip] iter %d seg %d: unreadable dcd (%s)" % (it, seg, str(exc)[:50]))
+            continue
+        src_top = top_by_natoms.get(n_dcd)
+        if src_top is None:
+            print("  [skip] iter %d seg %d: %d atoms matches no known topology %s"
+                  % (it, seg, n_dcd, sorted(top_by_natoms)))
+            continue
+        if u is None or u.atoms.n_atoms != n_dcd:
+            u = mda.Universe(src_top, dcd)
+        else:
+            u.load_new(dcd)
+        name = "bstate_%04d" % written
+        d = os.path.join(args.out, name)
+        os.makedirs(d)
+        if args.link:
+            os.symlink(os.path.realpath(ck), os.path.join(d, "gamd_restart.checkpoint"))
+        else:
+            shutil.copyfile(ck, os.path.join(d, "gamd_restart.checkpoint"))
+        u.trajectory[-1]
+        with mda.Writer(os.path.join(d, "output_restart.dcd"), u.atoms.n_atoms) as W:
+            W.write(u.atoms)
+        with open(os.path.join(d, "topology_override.txt"), "w") as fo:
+            fo.write(src_top + "\n")
+        lines.append("%s  %s  %s" % (name, format_weight(p), name))
+        manifest.append({"name": name, "source_iter": it, "source_seg": seg,
+                         "weight_renormalised": float(p)})
+        written += 1
+        if written % 25 == 0:
+            print("  ...wrote %d" % written)
+
+    if not written:
+        sys.exit("selection produced no usable basis states")
+    # re-normalise exactly over what actually got written
+    wn2 = exact_normalise(_np.ones(written))
+    lines = lines[:4] + ["%s  %s  %s" % (m["name"], format_weight(w), m["name"])
+                         for m, w in zip(manifest, wn2)]
+    for m, w in zip(manifest, wn2):
+        m["weight_renormalised"] = float(w)
+    with open(os.path.join(args.out, "bstates.txt"), "w") as fo:
+        fo.write("\n".join(lines) + "\n")
+    with open(os.path.join(args.out, "manifest.json"), "w") as fo:
+        _json.dump({"source": args.source, "selection_file": args.select_file,
+                    "criterion": sel.get("criterion"), "weighting": "uniform",
+                    "n_states": written, "states": manifest}, fo, indent=2)
+    print("\n[out] %d basis states -> %s" % (written, args.out))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -186,6 +300,13 @@ def main():
                     help="cap the number of basis states, keeping the best by cv_0")
     ap.add_argument("--link", action="store_true",
                     help="symlink checkpoints instead of copying them")
+    ap.add_argument("--select-file", default=None,
+                    help="JSON file with {\"pairs\": [[iter, seg], ...]} naming exactly "
+                         "which walkers to harvest. Bypasses --iter/--cut scoring, and "
+                         "may span several iterations -- use it when the right selection "
+                         "criterion is something the run's own CV does not measure "
+                         "(e.g. Q over contacts held out of every CV). Implies uniform "
+                         "weights, since weights are not comparable across iterations.")
     ap.add_argument("--uniform-weights", action="store_true",
                     help="give every retained state weight 1/N instead of "
                          "renormalising the source WE weights. Use this when the "
@@ -213,6 +334,10 @@ def main():
     import h5py
 
     src = args.source
+
+    if args.select_file:
+        return build_from_selection(args, mda, h5py)
+
     segdir = os.path.join(src, "traj_segs", "%06d" % args.iter)
     if not os.path.isdir(segdir):
         sys.exit("no such iteration directory: %s" % segdir)
