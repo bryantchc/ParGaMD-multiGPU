@@ -32,3 +32,10 @@ boost statistics are inconsistent with the checkpoints you seeded from.
 
 To use these instead, point `new_run.sh` at them or copy them over the run's
 `input.xml` / `equilibration/input.xml` after scaffolding.
+
+## west.cfg/
+
+Annotated `west.cfg` variants: 1D and 2D rectilinear grids, per-bin walker
+counts, and MAB. Includes a parameter reference for the rest of the file
+(`pcoord_len`, `scaleoffset`, `gen_istates`, the overflow bins) and notes on
+which schemes compose with which. See [west.cfg/README.md](west.cfg/README.md).
