@@ -18,6 +18,36 @@
 #                                        bypasses the N-2 safety lag)
 #   ./strip_iter.sh --all               alias for --finalize
 #
+#   ./strip_iter.sh --prune-checkpoints [--keep-every N] [--behind M] [--dry-run]
+#                                       DELETE gamd_restart.checkpoint from old
+#                                       iterations, keeping every Nth. IRREVERSIBLE.
+#                                       See "Checkpoint pruning" below.
+#
+# Checkpoint pruning
+# ------------------
+# Checkpoints dominate a stripped run's footprint: a solvated checkpoint is
+# ~49 MB per segment, so a 550-walker iteration costs ~27 GB in checkpoints
+# against ~12 GB in stripped trajectories. Pruning old ones is usually the
+# largest single disk win available to a finished or long-running simulation.
+#
+# This is deliberately NOT part of --iter/--finalize and never fires from
+# post_iter.sh. Stripping is LOSSLESS with respect to restartability -- solvent
+# leaves the DCD but the checkpoint still holds full positions, velocities and
+# GaMD state. Deleting a checkpoint is IRREVERSIBLE: it permanently removes the
+# ability to restart or re-seed a new run from that iteration, which is exactly
+# how Ultra_RL2.rna.preloop3 was built (basis states harvested from iterations
+# 103-121 of a finished run). That asset is worth keeping some of, so the
+# default policy thins history rather than clearing it.
+#
+# Safety rails, all unconditional:
+#   - only ever touches traj_segs/; bstates/ is never walked
+#   - never prunes the newest --behind iterations (default 20). runseg.sh reads
+#     only the PARENT's checkpoint (iter N-1), so 20 is far beyond what
+#     propagation needs -- the margin is for crash recovery, not correctness.
+#   - never prunes iteration 1
+#   - keeps every --keep-every'th iteration (default 10) as re-seeding anchors
+#   - --dry-run reports the reclaim total and deletes nothing
+#
 # Restart safety: WESTPA's runseg.sh freeze-fallback in iter N reads iter
 # N-1's output_restart.dcd. So during a live run, post_iter.sh only fires
 # stripping for iter N-2 — iters N-1 and N remain full-atom to keep the
@@ -58,15 +88,28 @@ usage() {
 # Args
 # ---------------------------------------------------------------------------
 MODE=""; ITER=""
+KEEP_EVERY="${PRUNE_CHECKPOINTS_KEEP_EVERY:-10}"
+BEHIND="${PRUNE_CHECKPOINTS_BEHIND:-20}"
+DRY_RUN=0
 while [ $# -gt 0 ]; do
     case "$1" in
-        --iter)            MODE=iter; ITER="$2"; shift 2 ;;
-        --finalize|--all)  MODE=finalize; shift ;;
-        -h|--help)         usage ;;
+        --iter)              MODE=iter; ITER="$2"; shift 2 ;;
+        --finalize|--all)    MODE=finalize; shift ;;
+        --prune-checkpoints) MODE=prune; shift ;;
+        --keep-every)        KEEP_EVERY="$2"; shift 2 ;;
+        --behind)            BEHIND="$2"; shift 2 ;;
+        --dry-run|-n)        DRY_RUN=1; shift ;;
+        -h|--help)           usage ;;
         *) echo "[strip] unknown arg: $1" >&2; usage ;;
     esac
 done
-[ -n "$MODE" ] || { echo "[strip] need --iter <N> or --finalize" >&2; usage; }
+[ -n "$MODE" ] || { echo "[strip] need --iter <N>, --finalize or --prune-checkpoints" >&2; usage; }
+
+if [ "$MODE" = prune ]; then
+    case "$KEEP_EVERY" in ''|*[!0-9]*) echo "[prune] --keep-every must be a positive integer" >&2; exit 1 ;; esac
+    case "$BEHIND"     in ''|*[!0-9]*) echo "[prune] --behind must be a non-negative integer" >&2; exit 1 ;; esac
+    [ "$KEEP_EVERY" -ge 1 ] || { echo "[prune] --keep-every must be >= 1" >&2; exit 1; }
+fi
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -191,12 +234,91 @@ strip_iter_dir() {  # $1 iter_number
     echo "[strip $(date +%H:%M:%S)] iter $iter: $done_now stripped, $already already-stripped, $failed failed (saved ${savings_mb} MB)"
 }
 
+# Delete checkpoints from one iteration. Returns bytes reclaimed on stdout.
+prune_iter_dir() {  # $1 iter_number
+    local iter="$1"
+    local iter_dir="traj_segs/$(printf '%06d' "$iter")"
+    [ -d "$iter_dir" ] || { echo 0; return 0; }
+
+    # Share the stripping lock so we never race the post_iter hook on an iter.
+    local lock="$iter_dir/.stripping.lock"
+    if [ "$DRY_RUN" -eq 0 ]; then
+        if ! ( set -o noclobber; echo $$ > "$lock" ) 2>/dev/null; then
+            local holder; holder=$(cat "$lock" 2>/dev/null || echo "?")
+            echo "[prune $(date +%H:%M:%S)] iter $iter: locked by pid $holder, skipping" >&2
+            echo 0; return 0
+        fi
+    fi
+
+    local bytes=0 n=0
+    for seg in "$iter_dir"/*/; do
+        [ -d "$seg" ] || continue
+        local ck="$seg/gamd_restart.checkpoint"
+        [ -f "$ck" ] || continue
+        local sz; sz=$(stat -c%s "$ck" 2>/dev/null || echo 0)
+        bytes=$((bytes + sz)); n=$((n + 1))
+        [ "$DRY_RUN" -eq 0 ] && rm -f "$ck"
+    done
+    if [ "$DRY_RUN" -eq 0 ]; then
+        rm -f "$lock"
+        [ "$n" -gt 0 ] && date +%FT%T > "$iter_dir/.checkpoints_pruned"
+    fi
+    echo "[prune $(date +%H:%M:%S)] iter $iter: $n checkpoints $( [ "$DRY_RUN" -eq 1 ] && echo "would be removed" || echo removed ) ($((bytes/1024/1024)) MB)" >&2
+    echo "$bytes"
+}
+
+prune_checkpoints() {
+    # Highest iteration directory present. During a live run this is the
+    # in-flight iteration, which is the conservative choice for --behind.
+    local latest=0 i
+    for iter_dir in traj_segs/0*/; do
+        [ -d "$iter_dir" ] || continue
+        i=$((10#$(basename "$iter_dir")))
+        [ "$i" -gt "$latest" ] && latest=$i
+    done
+    if [ "$latest" -eq 0 ]; then
+        echo "[prune] no iterations found under traj_segs/; nothing to do" >&2
+        return 0
+    fi
+
+    local cutoff=$((latest - BEHIND))
+    echo "[prune] latest iteration present : $latest"
+    echo "[prune] policy                   : keep every ${KEEP_EVERY}th, keep newest ${BEHIND}, keep iter 1"
+    echo "[prune] prunable range           : iterations 2..$cutoff"
+    [ "$DRY_RUN" -eq 1 ] && echo "[prune] DRY RUN -- nothing will be deleted"
+    if [ "$cutoff" -lt 2 ]; then
+        echo "[prune] nothing is old enough to prune (need iterations <= $cutoff)"
+        return 0
+    fi
+
+    local total=0 pruned=0 kept=0 got
+    for iter_dir in traj_segs/0*/; do
+        [ -d "$iter_dir" ] || continue
+        i=$((10#$(basename "$iter_dir")))
+        if [ "$i" -eq 1 ] || [ "$i" -gt "$cutoff" ] || [ $((i % KEEP_EVERY)) -eq 0 ]; then
+            kept=$((kept + 1)); continue
+        fi
+        got=$(prune_iter_dir "$i")
+        total=$((total + got)); pruned=$((pruned + 1))
+    done
+
+    echo "[prune] ------------------------------------------------------------"
+    echo "[prune] iterations pruned : $pruned"
+    echo "[prune] iterations kept   : $kept  (anchors + newest $BEHIND + iter 1)"
+    printf '[prune] space %s : %.1f GB\n' \
+        "$( [ "$DRY_RUN" -eq 1 ] && echo reclaimable || echo reclaimed )" \
+        "$(awk -v b="$total" 'BEGIN{print b/1073741824}')"
+}
+
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 case "$MODE" in
     iter)
         strip_iter_dir "$ITER"
+        ;;
+    prune)
+        prune_checkpoints
         ;;
     finalize)
         # Walk every traj_segs/0*/ in order. Iterations are numeric; sort
