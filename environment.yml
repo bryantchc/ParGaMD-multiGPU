@@ -1,0 +1,39 @@
+# Curated environment for ParGaMD (multi-GPU fork).
+#
+# This lists DIRECT dependencies only, pinned to the versions this fork has
+# actually been run with. Transitive packages are left to the solver.
+#
+#   conda env create -f environment.yml
+#   conda activate pargamd
+#
+# For a bit-exact rebuild of one specific machine, use environment.lock.yml
+# instead -- that is a full `conda env export` snapshot, including build
+# strings, and is therefore platform- and CUDA-specific.
+#
+# Notes on what is here and what is deliberately not:
+#   - westpa is PyPI-only (no conda-forge package), hence the pip section.
+#   - mdanalysis is NOT optional: runseg.sh, westpa_scripts/_pcoord_dispatch.py,
+#     get_pcoord.sh, make_bstates.py and every cv_*.py import it. Omitting it
+#     yields an env where the progress coordinate cannot be computed and
+#     propagation fails at iteration 1.
+#   - ambertools is needed only for cpptraj, used by westpa_scripts/strip_iter.sh.
+#   - scipy / parmed / mdtraj are NOT listed: nothing in this repo imports them
+#     directly; they arrive as westpa's own dependencies.
+#   - The GaMD engine is NOT a dependency -- it is vendored in this repo at
+#     runtime/gamd/ and resolved via the interpreter's script directory, so it
+#     is captured by git rather than by conda.
+name: pargamd
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - openmm=8.4.0
+  - cuda-version=12.8        # OpenMM CUDA platform; match your driver
+  - ambertools=24.8          # provides cpptraj (strip_iter.sh)
+  - mdanalysis=2.10.0        # pcoord pipeline + all CVs
+  - numpy=2.4.3
+  - h5py=3.16.0              # west.h5 readers in pgd/ and analyze/
+  - matplotlib
+  - pip
+  - pip:
+      - westpa==2022.15      # PyPI only; not packaged on conda-forge

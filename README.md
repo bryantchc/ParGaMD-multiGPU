@@ -119,17 +119,35 @@ A scaffolded run directory looks like this:
 ## Installation
 
 ### Prerequisites
-- Python ≥ 3.9, Anaconda / Miniconda
+- Anaconda / Miniconda (the Python version is pinned by `environment.yml`)
 - NVIDIA GPU with CUDA driver (see [BLACKWELL_NOTES.md](BLACKWELL_NOTES.md)
   for consumer-Blackwell-specific notes)
 
 ### Conda env
 ```bash
-conda create -n pargamd python=3.11
+conda env create -f environment.yml
 conda activate pargamd
-conda install -c conda-forge openmm mdanalysis mdtraj ambertools
-pip install westpa numpy matplotlib h5py
 ```
+
+`environment.yml` lists direct dependencies pinned to the versions this fork
+has actually been run with. If you need a bit-exact rebuild of a known-good
+machine rather than a portable one, use the full snapshot instead — it carries
+build strings, so it is platform- and CUDA-specific:
+
+```bash
+conda env create -f environment.lock.yml
+```
+
+Two things worth knowing about these dependencies:
+
+- **`mdanalysis` is not optional.** `westpa_scripts/runseg.sh`,
+  `_pcoord_dispatch.py`, `get_pcoord.sh`, `make_bstates.py` and every `cv_*.py`
+  import it. An environment without it fails at iteration 1, because the
+  progress coordinate cannot be computed.
+- **The GaMD engine is not a conda dependency.** It is vendored in this repo at
+  `runtime/gamd/` and resolved through the interpreter's script directory, so
+  it is versioned with the code rather than installed. `westpa` itself is
+  PyPI-only, which is why it appears in a `pip:` section.
 
 ### Repo
 ```bash
