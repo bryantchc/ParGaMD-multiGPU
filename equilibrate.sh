@@ -10,7 +10,28 @@
 # equilibration/input.xml). Refuses to clobber an existing seed without
 # --force.
 #
-# Wallclock: ~60 minutes on a 5090 for chignolin-sized systems.
+# Flags:
+#   --force    redo equilibration even though a seed checkpoint exists
+#   --resume   CONTINUE an interrupted equilibration from its checkpoint
+#
+# --resume exists because an equilibration is many hours and the machine will
+# sometimes need rebooting. gamdRunner_init takes -r, which loadCheckpoint()s
+# equilibration/out/gamd_restart.checkpoint and reads stepCount back off the
+# integrator. OpenMM checkpoints carry integrator global variables, so the
+# accumulated GaMD statistics (Vmax, Vmin, Vavg, sigmaV, k0, stepCount) are all
+# restored -- it is a genuine resume, not a restart. This only continues to the
+# original nstlim while extension-steps is 0, which is the case for the
+# equilibration templates; a non-zero value switches gamdRunner into extension
+# mode (that is what WE segments use) and --resume would then EXTEND rather
+# than continue, so it is refused below.
+#
+# Stopping safely first matters: the gamd runtime installs no signal handlers
+# and saveCheckpoint() writes in place, so a signal during a checkpoint write
+# truncates it. Use ./stop_gamd.sh <run_dir>, then
+# ./verify_gamd_checkpoint.sh <run_dir> before relying on it.
+#
+# Wallclock: ~60 minutes on a 5090 for chignolin-sized systems. A solvated
+# nucleoprotein complex of ~270k atoms takes ~16 h for the 41.5M-step protocol.
 
 set -euo pipefail
 
@@ -26,7 +47,20 @@ source env.sh
 : "${PARGAMD_SYSTEM_DIR:?PARGAMD_SYSTEM_DIR is unset; check env.sh}"
 
 FORCE=0
-[ "${1:-}" = "--force" ] && FORCE=1
+RESUME=0
+for arg in "$@"; do
+    case "$arg" in
+        --force)  FORCE=1 ;;
+        --resume) RESUME=1 ;;
+        *) echo "[equilibrate] unknown argument: $arg" >&2
+           echo "[equilibrate] usage: equilibrate.sh [--force] [--resume]" >&2
+           exit 1 ;;
+    esac
+done
+if [ "$FORCE" -eq 1 ] && [ "$RESUME" -eq 1 ]; then
+    echo "[equilibrate] --force and --resume are mutually exclusive" >&2
+    exit 1
+fi
 
 EQ_DIR="$WEST_SIM_ROOT/equilibration"
 EQ_OUT="$EQ_DIR/out"
@@ -43,7 +77,35 @@ ln -sfn "$PARGAMD_SYSTEM_DIR/${SYSTEM_NAME}.rst7"  "$EQ_DIR/coordinates.rst7"
 # ---------------------------------------------------------------------------
 # Run equilibration (skip if seed exists and no --force)
 # ---------------------------------------------------------------------------
-if [ -s "$SEED_CKPT" ] && [ "$FORCE" -ne 1 ]; then
+if [ "$RESUME" -eq 1 ]; then
+    if [ ! -s "$SEED_CKPT" ]; then
+        echo "[equilibrate] --resume needs an existing $SEED_CKPT" >&2
+        exit 1
+    fi
+    # extension-steps != 0 turns gamdRunner's restart path into an EXTENSION
+    # run (nstlim := stepCount + extension_steps), which is not what --resume
+    # means. Refuse rather than silently run the wrong length.
+    EXT=$(sed -n 's:.*<extension-steps>\([0-9]*\)</extension-steps>.*:\1:p' \
+          "$EQ_DIR/input.xml" | head -1)
+    if [ -n "${EXT:-}" ] && [ "$EXT" -ne 0 ]; then
+        echo "[equilibrate] refusing --resume: extension-steps=$EXT in input.xml" >&2
+        echo "[equilibrate] with a non-zero value gamdRunner EXTENDS instead of continuing." >&2
+        exit 1
+    fi
+    echo "[equilibrate] RESUMING equilibration for SYSTEM_NAME=$SYSTEM_NAME"
+    echo "[equilibrate] checkpoint: $SEED_CKPT"
+    : "${CUDA_VISIBLE_DEVICES:=0}"
+    export CUDA_VISIBLE_DEVICES
+    (
+        cd "$EQ_DIR"
+        python "$PARGAMD_RUNTIME_DIR/gamdRunner_init" -r -p CUDA xml input.xml \
+            | tee -a equilibration.log
+    )
+    if [ ! -s "$SEED_CKPT" ]; then
+        echo "[equilibrate] FAILED after resume — $SEED_CKPT missing/empty" >&2
+        exit 1
+    fi
+elif [ -s "$SEED_CKPT" ] && [ "$FORCE" -ne 1 ]; then
     echo "[equilibrate] seed checkpoint exists at $SEED_CKPT (use --force to redo)"
     echo "[equilibrate] proceeding to pcoord computation only"
 else
