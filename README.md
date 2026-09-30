@@ -90,6 +90,7 @@ pargamd/                          # this repo
 ├── analyze/                      # post-run analysis (PMF reweighting)
 ├── reweigh/                      # upstream reweighting tools (1D, 2D, CE)
 ├── README.md                     # this file
+├── REWEIGHTING_NOTES.md          # σ₀, WE-weight N_eff, which estimator to trust
 └── BLACKWELL_NOTES.md            # hardware quirks + multi-GPU tuning rationale
 ```
 
@@ -390,12 +391,17 @@ GaMD adds a harmonic boost ΔV(**r**) = ½ k (E − V(**r**))² when V(**r**)
 falls below E. Recovery of the unbiased free-energy surface requires
 reweighting that accounts for both the GaMD boost and the WE walker weights.
 
+**Read [REWEIGHTING_NOTES.md](REWEIGHTING_NOTES.md) first.** It covers what
+σ₀ controls, why WE weights collapse the effective sample size per bin
+(and with it CE2), and the recommended workflow: MC-10 or CE1, masking by
+N_eff, and CE2 only as a cross-check.
+
 Two methods, picked by the shape of the ΔV distribution in each bin:
 
 | ΔV distribution                       | Method | Script |
 |---------------------------------------|--------|--------|
-| Broad / non-Gaussian (e.g. chignolin, PPARα) | Maclaurin series | [`reweigh/reweigh.py`](reweigh/reweigh.py) |
-| Near-Gaussian (e.g. α-synuclein-PAL)  | Cumulant expansion | [`reweigh/reweigh_CE.py`](reweigh/reweigh_CE.py) |
+| Broad / non-Gaussian (e.g. chignolin, PPARα) | Maclaurin series (paper: MC-10) | [`reweigh/reweigh.py`](reweigh/reweigh.py) |
+| Near-Gaussian (e.g. α-synuclein-PAL)  | Cumulant expansion (paper: CE1) | [`reweigh/reweigh_CE.py`](reweigh/reweigh_CE.py) |
 
 ### Maclaurin (recommended default)
 
