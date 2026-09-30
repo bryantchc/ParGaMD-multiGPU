@@ -108,7 +108,32 @@ def policy_corner_weighted(idx, bounds, value=None):
     return 3
 
 
-POLICIES = {"uniform": policy_uniform, "corner-weighted": policy_corner_weighted}
+def policy_dock_frontier(idx, bounds, value=None):
+    """Drive dim 0 (docking) DOWN; leave dim 1 NEUTRAL.
+
+    Written for Ultra_RL2.tmd_noMg, whose duplex equilibrated to ~16 A on the
+    PI/WED docking CV (native ~4 A) with the lobes already open (REC1-RuvC COM
+    ~46 A, 9CJH 46.7). Counts depend on the docking bin only, so dim 1 gets
+    population diversity but no preferred direction:
+
+      - dock < 8 A   : 6   frontier, never visited yet; protect it from
+                           collapsing back (survival, as in corner-weighted)
+      - 8 - 14 A     : 4   the approach
+      - 14 - 22 A    : 2   where the run starts; oversampled by construction
+      - >= 22 A      : 1   duplex leaving; catch it, do not reward it
+    """
+    dock_lo = bounds[0][idx[0]]
+    if dock_lo >= 22.0:
+        return 1
+    if dock_lo >= 14.0:
+        return 2
+    if dock_lo >= 8.0:
+        return 4
+    return 6
+
+
+POLICIES = {"uniform": policy_uniform, "corner-weighted": policy_corner_weighted,
+            "dock-frontier": policy_dock_frontier}
 
 
 def main():
@@ -150,7 +175,14 @@ def main():
             p = np.zeros((1, len(bounds)))
             for dim, i in enumerate(idx):
                 lo, hi = bounds[dim][i], bounds[dim][i + 1]
-                p[0, dim] = lo + 1.0 if not np.isfinite(hi) else (lo + hi) / 2.0
+                if np.isfinite(lo) and np.isfinite(hi):
+                    p[0, dim] = (lo + hi) / 2.0
+                elif np.isfinite(lo):
+                    p[0, dim] = lo + 1.0
+                elif np.isfinite(hi):
+                    p[0, dim] = hi - 1.0
+                else:
+                    p[0, dim] = 0.0
             if int(m.assign(p)[0]) != flat:
                 bad += 1
         if bad:
@@ -167,10 +199,11 @@ def main():
         print("      # grid %s = %d bins; regenerate after ANY boundary change."
               % (" x ".join(map(str, shape)), nbins))
         print("      bin_target_counts: [")
-        for i in range(0, nbins, shape[-1]):
-            row = ", ".join("%d" % x for x in counts[i:i + shape[-1]])
-            tail = "," if i + shape[-1] < nbins else ""
-            print("        %s%s   # dim0 bin %d" % (row, tail, i // shape[-1]))
+        row_len = int(np.prod(shape[1:])) if len(shape) > 1 else 1
+        for i in range(0, nbins, row_len):
+            row = ", ".join("%d" % x for x in counts[i:i + row_len])
+            tail = "," if i + row_len < nbins else ""
+            print("        %s%s   # dim0 bin %d" % (row, tail, i // row_len))
         print("      ]")
     elif args.emit == "list":
         print(" ".join(str(int(x)) for x in counts))
