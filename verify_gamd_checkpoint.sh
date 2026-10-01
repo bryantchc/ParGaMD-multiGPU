@@ -3,6 +3,13 @@
 # A truncated checkpoint is not detectable by size alone; the only real test is
 # to build the system and load it. Run this BEFORE rebooting, so a corrupt
 # checkpoint is caught while the .bak copy is still fresh.
+#
+# LIMITATION: this loads positions with a plain Verlet integrator, so it cannot
+# see the GaMD integrator's global variables (stepCount, stage, Vmax, k0, ...).
+# A checkpoint written on one GPU and loaded on ANOTHER passes this check while
+# every integrator global comes back scrambled (seen 5070 -> 5090: k0 = 5.8,
+# stage 7.6) and the resume NaNs within 5000 steps. To change GPU, use
+# migrate_gamd_checkpoint.sh, never a plain --resume on the new card.
 set -euo pipefail
 RUN="${1:?usage: verify_gamd_checkpoint.sh <run_dir>}"
 cd "$RUN"; source env.sh

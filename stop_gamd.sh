@@ -34,7 +34,10 @@ for _ in $(seq 1 300); do
     fi
 done
 
-PIDS=$(ps -eo pid,args --no-headers | awk '/gamdRunner_init/ && !/awk/ {print $1}')
+# Match only the runner itself: argv[0] must be a python binary. A bare
+# /gamdRunner_init/ match also hit any shell whose command line merely MENTIONED
+# the name (e.g. `stop_gamd.sh ...; pgrep -af gamdRunner_init`) and TERMed it.
+PIDS=$(ps -eo pid,args --no-headers | awk '$2 ~ /(^|\/)python[0-9.]*$/ && /gamdRunner_init/ {print $1}')
 if [ -z "$PIDS" ]; then
     echo "[stop] no gamdRunner_init process found"
 else
