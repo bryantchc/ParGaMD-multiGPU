@@ -453,6 +453,7 @@ class Runner:
             )
                restart_dat_filename = os.path.join(output_directory, "gamd-restart.dat")
                load_gamd_stats_from_file(new_integrator, restart_dat_filename)
+               prime_langevin_coefficients(new_integrator)
                new_integrator.stage_5_start = old_step_count
                new_integrator.stage_5_end   = new_nstlim  
                
@@ -653,6 +654,37 @@ def load_gamd_stats(integrator, stats_dict):
             integrator.setGlobalVariableByName(key, val)
         except Exception:
             print(f"Warning: integrator has no global var '{key}', skipping.")
+
+
+def prime_langevin_coefficients(integrator):
+    """Set vscale/fscale/noisescale on a freshly built GaMD Langevin integrator.
+
+    GamdLangevinIntegrator initialises these three globals to 0.0 and appends
+    the instructions that compute them at the END of its program, after the
+    velocity update. On the first step of a NEW integrator the update is
+    therefore v = 0*v + 0*f/m + 0*noise: every velocity is zeroed. The
+    equilibration builds one integrator and absorbs that once at step 1, but
+    the extension (production) path builds a new one for every WE segment, so
+    each segment started from a 0 K quench. The potential then collapses
+    (~1-3e5 kJ/mol in 10 steps for a 270k-atom box); with k0 < 1 the boost
+    stays on below Vmin, the force-scaling factor goes negative and the
+    segment NaNs. (With k0 = 1 the boost cut out instead, which hid the bug.)
+    Values match what the integrator computes for itself from step 2 on.
+    """
+    import math
+    names = {integrator.getGlobalVariableName(i)
+             for i in range(integrator.getNumGlobalVariables())}
+    if not {"vscale", "fscale", "noisescale", "collision_rate",
+            "thermal_energy"} <= names:
+        return
+    dt = integrator.getStepSize().value_in_unit(unit.picoseconds)
+    gamma = integrator.getGlobalVariableByName("collision_rate")
+    kT = integrator.getGlobalVariableByName("thermal_energy")
+    vscale = math.exp(-dt * gamma)
+    integrator.setGlobalVariableByName("vscale", vscale)
+    integrator.setGlobalVariableByName("fscale", (1.0 - vscale) / gamma)
+    integrator.setGlobalVariableByName("noisescale",
+                                       math.sqrt(kT * (1.0 - vscale * vscale)))
 
 def load_gamd_stats_from_file(integrator, filename):
     """
