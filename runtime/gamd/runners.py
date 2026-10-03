@@ -495,7 +495,16 @@ class Runner:
                enforcePeriodicBox=True)
                old_step = simulation.currentStep
                platform = simulation.context.getPlatform()
-               properties = {"CudaPrecision": "mixed"}
+               # Run on the SAME device the checkpoint was loaded on. This used
+               # to be {"CudaPrecision": "mixed"} alone, so the new Simulation
+               # always landed on device 0: every WE segment ran on the 5090
+               # whatever -d / TARGET_GPU said, and the 5070 sat idle.
+               properties = {"Precision": "mixed"}
+               try:
+                   properties["DeviceIndex"] = platform.getPropertyValue(
+                       simulation.context, "DeviceIndex")
+               except Exception:
+                   pass
                new_simulation = Simulation(
                simulation.topology,
                system,
