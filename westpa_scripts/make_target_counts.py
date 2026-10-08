@@ -132,8 +132,36 @@ def policy_dock_frontier(idx, bounds, value=None):
     return 6
 
 
+def policy_dock_slope(idx, bounds, value=None):
+    """Climb a steep docking slope: walkers by docking bin only (dim 1 neutral).
+
+    For Ultra_RL2.tmd2_withMg after 37 MAB iterations. Measured over 5908
+    parent/child pairs (tau = 200 ps): the docking CV has a restoring drift
+    toward the ~7.9 A bulk of +0.18 A/tau at the 6.5-6.9 A frontier (sd 0.18,
+    only 2% of children advance > 0.2 A), i.e. ~1 kT per 0.1 A. WE climbs that
+    only with bins about one step wide (0.1 A; median |step| 0.15 A) and enough
+    walkers per frontier bin that some child advances every tau:
+
+      - dock < 7.0 A   : 8   the frontier and everything beyond it
+      - 7.0 - 7.6 A    : 5   just behind the frontier
+      - 7.6 - 8.4 A    : 3   the bulk (~7.9 A), oversampled for free
+      - 8.4 - 9.6 A    : 2
+      - >= 9.6 A       : 1   duplex backing out; keep it visible, do not feed it
+    """
+    lo = bounds[0][idx[0]]
+    if lo >= 9.6:
+        return 1
+    if lo >= 8.4:
+        return 2
+    if lo >= 7.6:
+        return 3
+    if lo >= 7.0:
+        return 5
+    return 8
+
+
 POLICIES = {"uniform": policy_uniform, "corner-weighted": policy_corner_weighted,
-            "dock-frontier": policy_dock_frontier}
+            "dock-frontier": policy_dock_frontier, "dock-slope": policy_dock_slope}
 
 
 def main():
